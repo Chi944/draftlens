@@ -17,6 +17,8 @@ import {
   RefreshCcw,
   ScanSearch,
   ShieldCheck,
+  Sparkles,
+  Undo2,
   UploadCloud,
   X,
 } from 'lucide-react'
@@ -31,6 +33,7 @@ import {
   type ReactNode,
 } from 'react'
 import { SAMPLE_REPORT, SAMPLE_REPORT_TITLE } from './data/sample'
+import { RevisionLab } from './components/RevisionLab'
 import { analyzeText } from './lib/analyzer'
 import {
   ACCEPTED_FILE_TYPES,
@@ -38,6 +41,11 @@ import {
   extractTextFromFile,
 } from './lib/document'
 import { PASSAGE_BANDS, passageBandLabel } from './lib/passage-bands'
+import {
+  applyAuditRevisionDraft,
+  planAuditRevisions,
+  type RevisionPlan,
+} from './lib/revision'
 import type {
   AnalysisResult,
   Classification,
@@ -45,7 +53,7 @@ import type {
   RevisionCoaching,
 } from './lib/types'
 
-type DocumentFilter = 'all' | 'flagged'
+type DocumentFilter = 'all' | 'flagged' | 'revise'
 
 const MIN_RECOMMENDED_WORDS = 300
 
@@ -209,9 +217,15 @@ function App() {
   const [isExporting, setIsExporting] = useState(false)
   const [exportError, setExportError] = useState('')
   const [error, setError] = useState('')
+  const [revisionPlan, setRevisionPlan] = useState<RevisionPlan | null>(null)
+  const [revisionDraft, setRevisionDraft] = useState('')
+  const [revisionBaseline, setRevisionBaseline] = useState<string | null>(null)
+  const [revisionHistory, setRevisionHistory] = useState<string[]>([])
+  const [revisionStatus, setRevisionStatus] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importRequestIdRef = useRef(0)
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null)
+  const reviewSectionRef = useRef<HTMLElement>(null)
   const wordCount = countWords(text)
   const acceptedTypeLabel = ACCEPTED_FILE_TYPES.map((type) =>
     type.slice(1).toUpperCase(),
@@ -243,6 +257,14 @@ function App() {
     if (analysis) resultsHeadingRef.current?.focus({ preventScroll: true })
   }, [analysis])
 
+  const resetRevisionSession = () => {
+    setRevisionPlan(null)
+    setRevisionDraft('')
+    setRevisionBaseline(null)
+    setRevisionHistory([])
+    setRevisionStatus('')
+  }
+
   const loadFile = async (file: File) => {
     const requestId = importRequestIdRef.current + 1
     importRequestIdRef.current = requestId
@@ -256,6 +278,7 @@ function App() {
       setAnalysis(null)
       setSelectedPassageId(null)
       setExportError('')
+      resetRevisionSession()
     } catch (cause) {
       if (requestId !== importRequestIdRef.current) return
       setError(cause instanceof Error ? cause.message : 'We could not read that file.')
@@ -290,6 +313,7 @@ function App() {
     setAnalysis(null)
     setSelectedPassageId(null)
     setExportError('')
+    resetRevisionSession()
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -306,6 +330,11 @@ function App() {
       setDocumentFilter('all')
       setError('')
       setExportError('')
+      setRevisionPlan(null)
+      setRevisionDraft('')
+      setRevisionBaseline(text)
+      setRevisionHistory([])
+      setRevisionStatus('')
       scrollToTop()
     } catch {
       setError('The analysis could not be completed. Please check the text and try again.')
@@ -317,7 +346,97 @@ function App() {
     setSelectedPassageId(null)
     setExportError('')
     setError('')
+    resetRevisionSession()
     scrollToTop()
+  }
+
+  const openRevisionLab = () => {
+    if (!analysis || analysis.flaggedPassages.length === 0) return
+
+    if (revisionPlan?.sourceText === text) {
+      setDocumentFilter('revise')
+      setRevisionStatus('Revision Lab opened. No changes have been applied.')
+      reviewSectionRef.current?.scrollIntoView?.({
+        behavior: 'smooth',
+        block: 'start',
+      })
+      return
+    }
+
+    const plan = planAuditRevisions(text, analysis)
+    if (plan.status === 'stale-audit' || plan.status === 'unavailable') {
+      setRevisionStatus(plan.warnings[0])
+      return
+    }
+
+    setRevisionPlan(plan)
+    setRevisionDraft(plan.previewText)
+    setRevisionBaseline((current) => current ?? text)
+    setDocumentFilter('revise')
+    setRevisionStatus(
+      plan.edits.length > 0
+        ? `Revision Lab opened with ${plan.edits.length} conservative wording ${plan.edits.length === 1 ? 'change' : 'changes'} for review.`
+        : 'Revision Lab opened with audit-guided prompts. No wording was changed automatically.',
+    )
+    reviewSectionRef.current?.scrollIntoView?.({
+      behavior: 'smooth',
+      block: 'start',
+    })
+  }
+
+  const applyRevisionDraft = () => {
+    if (!analysis || !revisionPlan) return
+
+    const applied = applyAuditRevisionDraft(text, revisionPlan, revisionDraft)
+    if (applied.status === 'stale-plan') {
+      setRevisionStatus(
+        'The document changed after this revision draft was prepared. Run the audit again before applying it.',
+      )
+      return
+    }
+    if (applied.text === text) return
+
+    try {
+      const previousText = text
+      const result = analyzeText(applied.text)
+      setRevisionHistory((history) => [...history, previousText].slice(-10))
+      setText(applied.text)
+      setAnalysis(result)
+      setSelectedPassageId(result.flaggedPassages[0]?.id ?? null)
+      setDocumentFilter('all')
+      setRevisionPlan(null)
+      setRevisionDraft('')
+      setRevisionStatus('Revision applied. The document audit has been refreshed.')
+      setError('')
+      setExportError('')
+      scrollToTop()
+    } catch {
+      setRevisionStatus(
+        'The revised draft could not be audited, so no document changes were applied.',
+      )
+    }
+  }
+
+  const undoLastRevision = () => {
+    const previousText = revisionHistory.at(-1)
+    if (previousText === undefined) return
+
+    try {
+      const result = analyzeText(previousText)
+      setText(previousText)
+      setAnalysis(result)
+      setSelectedPassageId(result.flaggedPassages[0]?.id ?? null)
+      setDocumentFilter('all')
+      setRevisionPlan(null)
+      setRevisionDraft('')
+      setRevisionHistory((history) => history.slice(0, -1))
+      setRevisionStatus('The last applied revision was undone and the audit was refreshed.')
+      setError('')
+      setExportError('')
+      scrollToTop()
+    } catch {
+      setRevisionStatus('The previous draft could not be restored.')
+    }
   }
 
   const exportWordReport = async () => {
@@ -348,6 +467,7 @@ function App() {
     setDocumentFilter('all')
     setExportError('')
     setError('')
+    resetRevisionSession()
     if (fileInputRef.current) fileInputRef.current.value = ''
     scrollToTop()
   }
@@ -359,13 +479,15 @@ function App() {
           ? 'Reading the selected document.'
           : isExporting
             ? 'Preparing the Word audit report.'
-          : analysis
-            ? `Analysis complete. Estimated AI-pattern coverage ${analysis.coverage.displayLabel}.${
-                selectedPassage
-                  ? ` Passage ${selectedPassageIndex} selected for coaching.`
-                  : ''
-              }`
-            : ''}
+            : revisionStatus
+              ? revisionStatus
+              : analysis
+                ? `Analysis complete. Estimated AI-pattern coverage ${analysis.coverage.displayLabel}.${
+                    selectedPassage
+                      ? ` Passage ${selectedPassageIndex} selected for coaching.`
+                      : ''
+                  }`
+                : ''}
       </div>
       <a className="skip-link" href="#main-content">
         Skip to content
@@ -569,9 +691,19 @@ function App() {
               </p>
             </div>
             <div className="results-actions">
+              {analysis.flaggedPassages.length > 0 && (
+                <button
+                  className="secondary-button"
+                  onClick={openRevisionLab}
+                  type="button"
+                >
+                  <Sparkles size={16} aria-hidden="true" />
+                  Revision Lab
+                </button>
+              )}
               <button
                 aria-busy={isExporting}
-                className="secondary-button"
+                className="quiet-button"
                 disabled={isExporting}
                 onClick={() => void exportWordReport()}
                 type="button"
@@ -583,12 +715,32 @@ function App() {
                 <PenLine size={16} aria-hidden="true" />
                 Edit draft
               </button>
+              {revisionHistory.length > 0 && (
+                <button className="quiet-button" onClick={undoLastRevision} type="button">
+                  <Undo2 size={16} aria-hidden="true" />
+                  Undo revision
+                </button>
+              )}
               <button className="quiet-button" onClick={startOver} type="button">
                 <RefreshCcw size={16} aria-hidden="true" />
                 Start over
               </button>
             </div>
           </div>
+
+          {revisionStatus && (
+            <div className="revision-status-message" role="status">
+              <Info size={17} aria-hidden="true" />
+              <span>{revisionStatus}</span>
+              <button
+                aria-label="Dismiss revision status"
+                onClick={() => setRevisionStatus('')}
+                type="button"
+              >
+                <X size={15} aria-hidden="true" />
+              </button>
+            </div>
+          )}
 
           {exportError && (
             <div className="error-message results-error" role="alert">
@@ -726,7 +878,11 @@ function App() {
             )}
           </section>
 
-          <section className="review-section" aria-labelledby="review-title">
+          <section
+            className="review-section"
+            aria-labelledby="review-title"
+            ref={reviewSectionRef}
+          >
             <div className="section-heading-row review-heading">
               <div>
                 <span className="section-kicker">Passage review</span>
@@ -750,20 +906,32 @@ function App() {
                   Flagged only
                   <span>{analysis.flaggedPassages.length}</span>
                 </button>
+                {analysis.flaggedPassages.length > 0 && (
+                  <button
+                    aria-pressed={documentFilter === 'revise'}
+                    className={documentFilter === 'revise' ? 'is-active' : ''}
+                    onClick={openRevisionLab}
+                    type="button"
+                  >
+                    Revision Lab
+                  </button>
+                )}
               </div>
             </div>
 
-            <div className="band-guide" role="note" aria-label="Passage band definitions">
-              <p>
-                <span className="risk-label risk-label--mixed">Review</span>
-                {PASSAGE_BANDS.mixed.definition}
-              </p>
-              <p>
-                <span className="risk-label risk-label--high">Elevated</span>
-                {PASSAGE_BANDS.high.definition}
-              </p>
-              <small>Both are context-review cues, not findings of AI authorship.</small>
-            </div>
+            {documentFilter !== 'revise' && (
+              <div className="band-guide" role="note" aria-label="Passage band definitions">
+                <p>
+                  <span className="risk-label risk-label--mixed">Review</span>
+                  {PASSAGE_BANDS.mixed.definition}
+                </p>
+                <p>
+                  <span className="risk-label risk-label--high">Elevated</span>
+                  {PASSAGE_BANDS.high.definition}
+                </p>
+                <small>Both are context-review cues, not findings of AI authorship.</small>
+              </div>
+            )}
 
             <div className="review-grid">
               <article className="document-panel">
@@ -772,13 +940,36 @@ function App() {
                     <FileText size={17} aria-hidden="true" />
                     <span>{sourceName}</span>
                   </div>
-                  <div className="legend" aria-label="Highlight legend">
-                    <span><i className="legend__swatch legend__swatch--mixed" />Review</span>
-                    <span><i className="legend__swatch legend__swatch--high" />Elevated</span>
-                  </div>
+                  {documentFilter === 'revise' ? (
+                    <div className="revision-toolbar-note">
+                      <Sparkles size={14} aria-hidden="true" />
+                      Draft not applied
+                    </div>
+                  ) : (
+                    <div className="legend" aria-label="Highlight legend">
+                      <span><i className="legend__swatch legend__swatch--mixed" />Review</span>
+                      <span><i className="legend__swatch legend__swatch--high" />Elevated</span>
+                    </div>
+                  )}
                 </div>
 
-                {documentFilter === 'all' ? (
+                {documentFilter === 'revise' ? (
+                  revisionPlan ? (
+                    <RevisionLab
+                      baselineText={revisionBaseline}
+                      onApply={applyRevisionDraft}
+                      onChange={setRevisionDraft}
+                      plan={revisionPlan}
+                      value={revisionDraft}
+                    />
+                  ) : (
+                    <div className="document-empty">
+                      <CircleAlert size={22} aria-hidden="true" />
+                      <h3>Revision draft unavailable</h3>
+                      <p>Return to the passage view and open Revision Lab again.</p>
+                    </div>
+                  )
+                ) : documentFilter === 'all' ? (
                   <HighlightedDocument
                     onSelect={(passage) => setSelectedPassageId(passage.id)}
                     passages={analysis.flaggedPassages}
