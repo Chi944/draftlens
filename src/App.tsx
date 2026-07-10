@@ -44,6 +44,7 @@ import { PASSAGE_BANDS, passageBandLabel } from './lib/passage-bands'
 import {
   applyAuditRevisionDraft,
   planAuditRevisions,
+  type RevisionMode,
   type RevisionPlan,
 } from './lib/revision'
 import type {
@@ -54,6 +55,12 @@ import type {
 } from './lib/types'
 
 type DocumentFilter = 'all' | 'flagged' | 'revise'
+
+interface RevisionPreviewSnapshot {
+  sourceText: string
+  draftText: string
+  analysis: AnalysisResult
+}
 
 const MIN_RECOMMENDED_WORDS = 300
 
@@ -222,6 +229,10 @@ function App() {
   const [revisionBaseline, setRevisionBaseline] = useState<string | null>(null)
   const [revisionHistory, setRevisionHistory] = useState<string[]>([])
   const [revisionStatus, setRevisionStatus] = useState('')
+  const [revisionMode, setRevisionMode] =
+    useState<RevisionMode>('comprehensive')
+  const [revisionPreview, setRevisionPreview] =
+    useState<RevisionPreviewSnapshot | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importRequestIdRef = useRef(0)
   const resultsHeadingRef = useRef<HTMLHeadingElement>(null)
@@ -263,6 +274,8 @@ function App() {
     setRevisionBaseline(null)
     setRevisionHistory([])
     setRevisionStatus('')
+    setRevisionMode('comprehensive')
+    setRevisionPreview(null)
   }
 
   const loadFile = async (file: File) => {
@@ -335,6 +348,8 @@ function App() {
       setRevisionBaseline(text)
       setRevisionHistory([])
       setRevisionStatus('')
+      setRevisionMode('comprehensive')
+      setRevisionPreview(null)
       scrollToTop()
     } catch {
       setError('The analysis could not be completed. Please check the text and try again.')
@@ -350,6 +365,34 @@ function App() {
     scrollToTop()
   }
 
+  const prepareRevisionWorkspace = (mode: RevisionMode) => {
+    if (!analysis || analysis.flaggedPassages.length === 0) return null
+
+    const plan = planAuditRevisions(text, analysis, { mode })
+    if (plan.status === 'stale-audit' || plan.status === 'unavailable') {
+      setRevisionStatus(plan.warnings[0])
+      return null
+    }
+
+    try {
+      const previewAnalysis = analyzeText(plan.previewText)
+      setRevisionPlan(plan)
+      setRevisionMode(mode)
+      setRevisionDraft(plan.previewText)
+      setRevisionPreview({
+        sourceText: text,
+        draftText: plan.previewText,
+        analysis: previewAnalysis,
+      })
+      setRevisionBaseline((current) => current ?? text)
+      setDocumentFilter('revise')
+      return plan
+    } catch {
+      setRevisionStatus('The revision draft could not be prepared in this browser.')
+      return null
+    }
+  }
+
   const openRevisionLab = () => {
     if (!analysis || analysis.flaggedPassages.length === 0) return
 
@@ -363,19 +406,12 @@ function App() {
       return
     }
 
-    const plan = planAuditRevisions(text, analysis)
-    if (plan.status === 'stale-audit' || plan.status === 'unavailable') {
-      setRevisionStatus(plan.warnings[0])
-      return
-    }
+    const plan = prepareRevisionWorkspace('comprehensive')
+    if (!plan) return
 
-    setRevisionPlan(plan)
-    setRevisionDraft(plan.previewText)
-    setRevisionBaseline((current) => current ?? text)
-    setDocumentFilter('revise')
     setRevisionStatus(
       plan.edits.length > 0
-        ? `Revision Lab opened with ${plan.edits.length} conservative wording ${plan.edits.length === 1 ? 'change' : 'changes'} for review.`
+        ? `Revision Lab opened with ${plan.edits.length} comprehensive clarity ${plan.edits.length === 1 ? 'edit' : 'edits'} for review.`
         : 'Revision Lab opened with audit-guided prompts. No wording was changed automatically.',
     )
     reviewSectionRef.current?.scrollIntoView?.({
@@ -384,8 +420,46 @@ function App() {
     })
   }
 
+  const changeRevisionMode = (mode: RevisionMode) => {
+    const plan = prepareRevisionWorkspace(mode)
+    if (!plan) return
+    setRevisionStatus(
+      `${mode === 'comprehensive' ? 'Comprehensive clarity' : 'Conservative cleanup'} draft rebuilt with ${plan.edits.length} ${plan.edits.length === 1 ? 'edit' : 'edits'} for review.`,
+    )
+  }
+
+  const changeRevisionDraft = (value: string) => {
+    setRevisionDraft(value)
+    setRevisionPreview(null)
+  }
+
+  const previewRevisionDraft = () => {
+    if (!revisionPlan) return
+
+    try {
+      const previewAnalysis = analyzeText(revisionDraft)
+      setRevisionPreview({
+        sourceText: text,
+        draftText: revisionDraft,
+        analysis: previewAnalysis,
+      })
+      setRevisionStatus('Draft audit preview refreshed. No changes have been applied.')
+    } catch {
+      setRevisionPreview(null)
+      setRevisionStatus('The draft audit preview could not be completed.')
+    }
+  }
+
   const applyRevisionDraft = () => {
     if (!analysis || !revisionPlan) return
+    if (
+      !revisionPreview ||
+      revisionPreview.sourceText !== text ||
+      revisionPreview.draftText !== revisionDraft
+    ) {
+      setRevisionStatus('Preview this exact draft audit before applying it.')
+      return
+    }
 
     const applied = applyAuditRevisionDraft(text, revisionPlan, revisionDraft)
     if (applied.status === 'stale-plan') {
@@ -396,25 +470,20 @@ function App() {
     }
     if (applied.text === text) return
 
-    try {
-      const previousText = text
-      const result = analyzeText(applied.text)
-      setRevisionHistory((history) => [...history, previousText].slice(-10))
-      setText(applied.text)
-      setAnalysis(result)
-      setSelectedPassageId(result.flaggedPassages[0]?.id ?? null)
-      setDocumentFilter('all')
-      setRevisionPlan(null)
-      setRevisionDraft('')
-      setRevisionStatus('Revision applied. The document audit has been refreshed.')
-      setError('')
-      setExportError('')
-      scrollToTop()
-    } catch {
-      setRevisionStatus(
-        'The revised draft could not be audited, so no document changes were applied.',
-      )
-    }
+    const previousText = text
+    const result = revisionPreview.analysis
+    setRevisionHistory((history) => [...history, previousText].slice(-10))
+    setText(applied.text)
+    setAnalysis(result)
+    setSelectedPassageId(result.flaggedPassages[0]?.id ?? null)
+    setDocumentFilter('all')
+    setRevisionPlan(null)
+    setRevisionDraft('')
+    setRevisionPreview(null)
+    setRevisionStatus('Previewed revision applied. The document audit is current.')
+    setError('')
+    setExportError('')
+    scrollToTop()
   }
 
   const undoLastRevision = () => {
@@ -429,6 +498,7 @@ function App() {
       setDocumentFilter('all')
       setRevisionPlan(null)
       setRevisionDraft('')
+      setRevisionPreview(null)
       setRevisionHistory((history) => history.slice(0, -1))
       setRevisionStatus('The last applied revision was undone and the audit was refreshed.')
       setError('')
@@ -957,9 +1027,19 @@ function App() {
                   revisionPlan ? (
                     <RevisionLab
                       baselineText={revisionBaseline}
+                      currentAnalysis={analysis}
+                      mode={revisionMode}
                       onApply={applyRevisionDraft}
-                      onChange={setRevisionDraft}
+                      onChange={changeRevisionDraft}
+                      onModeChange={changeRevisionMode}
+                      onPreview={previewRevisionDraft}
                       plan={revisionPlan}
+                      previewAnalysis={
+                        revisionPreview?.sourceText === text &&
+                        revisionPreview.draftText === revisionDraft
+                          ? revisionPreview.analysis
+                          : null
+                      }
                       value={revisionDraft}
                     />
                   ) : (

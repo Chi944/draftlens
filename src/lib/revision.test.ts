@@ -203,4 +203,83 @@ describe('audit-guided revision planning', () => {
     expect(plan.edits).toHaveLength(0)
     expect(plan.previewText).toBe(sentence)
   })
+
+  it('builds a comprehensive clarity draft while preserving protected facts', () => {
+    const sentence =
+      'In conclusion, it is evident that the clinic conducted an analysis of 48 records in order to determine whether the 4% threshold still applied (Nair, 2025).'
+    const plan = planAuditRevisions(
+      sentence,
+      makeAudit(sentence, [sentence], [
+        'stock-phrases',
+        'nominalized-language',
+        'statistical-pattern',
+      ]),
+      { mode: 'comprehensive' },
+    )
+
+    expect(plan.mode).toBe('comprehensive')
+    expect(plan.previewText).toBe(
+      'Evidently, the clinic analyzed 48 records to determine whether the 4% threshold still applied (Nair, 2025).',
+    )
+    expect(plan.edits[0]?.ruleIds).toEqual([
+      'remove-conclusion-signpost',
+      'compress-evident-frame',
+      'shorten-in-order-to',
+      'simplify-analysis',
+    ])
+    expect(plan.previewText).toContain('48')
+    expect(plan.previewText).toContain('4%')
+    expect(plan.previewText).toContain('(Nair, 2025)')
+  })
+
+  it('scans qualifying prose beyond the highlighted passage in comprehensive mode', () => {
+    const sentences = [
+      'It is important to note that the review started.',
+      'The committee made a decision to meet on a weekly basis.',
+    ]
+    const text = sentences.join(' ')
+    const audit = makeAudit(text, sentences, ['stock-phrases'], [0])
+
+    const conservative = planAuditRevisions(text, audit)
+    const comprehensive = planAuditRevisions(text, audit, {
+      mode: 'comprehensive',
+    })
+
+    expect(conservative.previewText).toContain('made a decision')
+    expect(comprehensive.previewText).toBe(
+      'Importantly, the review started. The committee decided to meet weekly.',
+    )
+    expect(comprehensive.edits[1]?.passageId).toBeNull()
+  })
+
+  it('removes only repeated additive transitions within the same paragraph', () => {
+    const sentences = [
+      'Moreover, the first supported claim remains.',
+      'Moreover, the second supported claim remains.',
+      'Moreover, the new paragraph keeps its opening link.',
+    ]
+    const text = `${sentences[0]} ${sentences[1]}\n\n${sentences[2]}`
+    const plan = planAuditRevisions(
+      text,
+      makeAudit(text, sentences, ['repeated-transitions']),
+      { mode: 'comprehensive' },
+    )
+
+    expect(plan.previewText).toBe(
+      'Moreover, the first supported claim remains. The second supported claim remains.\n\nMoreover, the new paragraph keeps its opening link.',
+    )
+  })
+
+  it('leaves quoted wording unchanged during comprehensive revision', () => {
+    const sentence =
+      'It is clear that Maya wrote “The clinic conducted an analysis of 48 records.” in memo C17.'
+    const plan = planAuditRevisions(
+      sentence,
+      makeAudit(sentence, [sentence], ['stock-phrases']),
+      { mode: 'comprehensive' },
+    )
+
+    expect(plan.previewText).toBe(sentence)
+    expect(plan.edits).toHaveLength(0)
+  })
 })
