@@ -2,6 +2,8 @@
 
 DraftLens is a private, explainable writing-pattern reviewer. Paste or import a report, get a 0–100 **AI-likeness pattern score**, inspect the exact passages that raised it, and work through concrete coaching for clearer, more specific writing.
 
+**Live app:** [draftlens-seven.vercel.app](https://draftlens-seven.vercel.app)
+
 > [!IMPORTANT]
 > The score is a deterministic heuristic—not a probability of AI authorship. DraftLens cannot prove who wrote a document, is not a plagiarism checker, and is not affiliated with Turnitin, QuillBot, or any assessment platform.
 
