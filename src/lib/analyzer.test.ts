@@ -200,6 +200,20 @@ describe('analyzeText', () => {
     })
   })
 
+  it('separates detected passages into Review and Elevated local bands', () => {
+    const result = analyzeText(
+      [formulaicText, formulaicText, ...Array(3).fill(concreteText)].join(' '),
+    )
+
+    expect(result.coverage.status).toBe('exact')
+    expect(result.score).toBeGreaterThanOrEqual(20)
+    expect(result.flaggedPassages[0]?.score).toBeGreaterThanOrEqual(95)
+    expect(result.flaggedPassages[1]?.score).toBeLessThan(95)
+    expect(
+      result.flaggedPassages.map((passage) => passage.classification),
+    ).toEqual(['high', 'mixed'])
+  })
+
   it('suppresses exact 1-19% results and their highlights', () => {
     const mixed = analyzeText(
       [formulaicText, ...Array(4).fill(concreteText)].join(' '),

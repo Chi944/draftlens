@@ -15,7 +15,9 @@ DraftLens is a private, explainable AI-pattern coverage estimator for academic p
 - Uses the conservative display states `0%`, `*%` for raw 1-19% results, and exact percentages from 20-100%.
 - Requires at least 300 qualifying words for a reportable result.
 - Highlights detected passages only when the document reaches the 20% reporting line.
+- Separates reportable passages into `Review` (below 95/100 locally) and `Elevated` (95/100 or higher) context-review bands.
 - Retains explainable signals and revision coaching as secondary context.
+- Exports a real Word audit report with the summary, passage evidence, highlighted document, methodology, and limitations.
 - Runs entirely in the browser. DraftLens does not upload or save reports.
 
 ## Run locally
@@ -35,7 +37,7 @@ npm run lint
 npm run build
 ```
 
-The tests cover deterministic score bounds, coverage arithmetic, qualifying-prose exclusions, bibliography invariance, score suppression, sentence offsets, calibration behavior, and document import.
+The tests cover deterministic score bounds, coverage arithmetic, passage bands, qualifying-prose exclusions, bibliography invariance, score suppression, sentence offsets, calibration behavior, document import, and Word export integrity.
 
 ## How the estimate works
 
@@ -80,10 +82,11 @@ Do not revise text merely to change a detector score. Keep changes accurate and 
 - React + TypeScript + Vite
 - `pdfjs-dist` for local PDF extraction
 - `mammoth` for local DOCX extraction
+- `docx` for client-side Word audit generation
 - A deterministic, browser-side statistical profile with no runtime API call
 - Vitest for analyzer and import tests
 
-The analyzer is in [`src/lib/analyzer.ts`](src/lib/analyzer.ts), the feature extractor is in [`src/lib/statistical-features.ts`](src/lib/statistical-features.ts), and the generated profile is in [`src/data/calibration-profile.ts`](src/data/calibration-profile.ts).
+The analyzer is in [`src/lib/analyzer.ts`](src/lib/analyzer.ts), the Word exporter is in [`src/lib/export-report.ts`](src/lib/export-report.ts), the feature extractor is in [`src/lib/statistical-features.ts`](src/lib/statistical-features.ts), and the generated profile is in [`src/data/calibration-profile.ts`](src/data/calibration-profile.ts).
 
 ## License
 

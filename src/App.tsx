@@ -6,6 +6,7 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
+  Download,
   FileText,
   Fingerprint,
   Flag,
@@ -36,6 +37,7 @@ import {
   FILE_ACCEPT,
   extractTextFromFile,
 } from './lib/document'
+import { PASSAGE_BANDS, passageBandLabel } from './lib/passage-bands'
 import type {
   AnalysisResult,
   Classification,
@@ -142,7 +144,7 @@ function HighlightedDocument({
       if (passage.end > start) {
         fragments.push(
           <button
-            aria-label={`Open coaching for detected passage ${index + 1}`}
+            aria-label={`Open coaching for ${passageBandLabel(passage.classification)} passage ${index + 1}`}
             aria-pressed={selectedId === passage.id}
             className={`document-highlight document-highlight--${passage.classification}${
               selectedId === passage.id ? ' is-selected' : ''
@@ -154,7 +156,7 @@ function HighlightedDocument({
             {text.slice(start, passage.end)}
             <span className="document-highlight__label" aria-hidden="true">
               <Flag size={11} strokeWidth={2.5} />
-              {passage.classification === 'high' ? 'Elevated' : 'Detected'}
+              {passageBandLabel(passage.classification)}
             </span>
           </button>,
         )
@@ -204,6 +206,8 @@ function App() {
   const [documentFilter, setDocumentFilter] = useState<DocumentFilter>('all')
   const [isDragging, setIsDragging] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
   const [error, setError] = useState('')
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importRequestIdRef = useRef(0)
@@ -251,6 +255,7 @@ function App() {
       setSourceName(document.name)
       setAnalysis(null)
       setSelectedPassageId(null)
+      setExportError('')
     } catch (cause) {
       if (requestId !== importRequestIdRef.current) return
       setError(cause instanceof Error ? cause.message : 'We could not read that file.')
@@ -284,6 +289,7 @@ function App() {
     setError('')
     setAnalysis(null)
     setSelectedPassageId(null)
+    setExportError('')
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -299,6 +305,7 @@ function App() {
       setSelectedPassageId(result.flaggedPassages[0]?.id ?? null)
       setDocumentFilter('all')
       setError('')
+      setExportError('')
       scrollToTop()
     } catch {
       setError('The analysis could not be completed. Please check the text and try again.')
@@ -308,8 +315,28 @@ function App() {
   const editDraft = () => {
     setAnalysis(null)
     setSelectedPassageId(null)
+    setExportError('')
     setError('')
     scrollToTop()
+  }
+
+  const exportWordReport = async () => {
+    if (!analysis || isExporting) return
+
+    setIsExporting(true)
+    setExportError('')
+    try {
+      const { downloadAuditReportDocx } = await import(
+        './lib/export-report'
+      )
+      await downloadAuditReportDocx({ text, sourceName, analysis })
+    } catch {
+      setExportError(
+        'The Word report could not be generated. Please try again in this browser.',
+      )
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   const startOver = () => {
@@ -319,6 +346,7 @@ function App() {
     setAnalysis(null)
     setSelectedPassageId(null)
     setDocumentFilter('all')
+    setExportError('')
     setError('')
     if (fileInputRef.current) fileInputRef.current.value = ''
     scrollToTop()
@@ -329,6 +357,8 @@ function App() {
       <div aria-atomic="true" aria-live="polite" className="visually-hidden" role="status">
         {isImporting
           ? 'Reading the selected document.'
+          : isExporting
+            ? 'Preparing the Word audit report.'
           : analysis
             ? `Analysis complete. Estimated AI-pattern coverage ${analysis.coverage.displayLabel}.${
                 selectedPassage
@@ -539,7 +569,17 @@ function App() {
               </p>
             </div>
             <div className="results-actions">
-              <button className="secondary-button" onClick={editDraft} type="button">
+              <button
+                aria-busy={isExporting}
+                className="secondary-button"
+                disabled={isExporting}
+                onClick={() => void exportWordReport()}
+                type="button"
+              >
+                <Download size={16} aria-hidden="true" />
+                {isExporting ? 'Preparing Word report...' : 'Export Word report'}
+              </button>
+              <button className="quiet-button" onClick={editDraft} type="button">
                 <PenLine size={16} aria-hidden="true" />
                 Edit draft
               </button>
@@ -549,6 +589,20 @@ function App() {
               </button>
             </div>
           </div>
+
+          {exportError && (
+            <div className="error-message results-error" role="alert">
+              <CircleAlert size={17} aria-hidden="true" />
+              <span>{exportError}</span>
+              <button
+                aria-label="Dismiss export error"
+                onClick={() => setExportError('')}
+                type="button"
+              >
+                <X size={15} aria-hidden="true" />
+              </button>
+            </div>
+          )}
 
           <section className="overview-grid" aria-labelledby="overview-title">
             <h2 className="visually-hidden" id="overview-title">
@@ -699,6 +753,18 @@ function App() {
               </div>
             </div>
 
+            <div className="band-guide" role="note" aria-label="Passage band definitions">
+              <p>
+                <span className="risk-label risk-label--mixed">Review</span>
+                {PASSAGE_BANDS.mixed.definition}
+              </p>
+              <p>
+                <span className="risk-label risk-label--high">Elevated</span>
+                {PASSAGE_BANDS.high.definition}
+              </p>
+              <small>Both are context-review cues, not findings of AI authorship.</small>
+            </div>
+
             <div className="review-grid">
               <article className="document-panel">
                 <div className="document-panel__toolbar">
@@ -732,11 +798,11 @@ function App() {
                         type="button"
                       >
                         <span className={`flagged-excerpt__index flagged-excerpt__index--${passage.classification}`}>
-                          Passage {index + 1}
+                          Passage {index + 1} / {passageBandLabel(passage.classification)}
                         </span>
                         <q>{passage.text}</q>
-                        <span className="flagged-excerpt__score">
-                          Detected passage
+                        <span className={`flagged-excerpt__score flagged-excerpt__score--${passage.classification}`}>
+                          {passage.score}/100 local
                           <ChevronRight size={15} aria-hidden="true" />
                         </span>
                       </button>
@@ -779,9 +845,9 @@ function App() {
                     <blockquote>{selectedPassage.text}</blockquote>
                     <div className="passage-score-row">
                       <span className={`risk-label risk-label--${selectedPassage.classification}`}>
-                        {selectedPassage.classification === 'high' ? 'Elevated' : 'Detected'}
+                        {passageBandLabel(selectedPassage.classification)}
                       </span>
-                      <strong>Local passage evidence</strong>
+                      <strong>{selectedPassage.score}/100 weighted local estimate</strong>
                     </div>
 
                     <div className="reason-list">

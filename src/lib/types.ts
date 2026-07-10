@@ -71,6 +71,7 @@ export interface FlaggedPassage {
   start: number
   end: number
   text: string
+  /** Word-weighted local statistical estimate for this detected passage. */
   score: number
   classification: Exclude<Classification, 'low'>
   sentenceIds: string[]

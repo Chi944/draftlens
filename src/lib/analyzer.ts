@@ -18,6 +18,7 @@ import {
   createStatisticalWindowRanges,
   scoreStatisticalWindow,
 } from './statistical-features'
+import { classifyDetectedPassageScore } from './passage-bands'
 
 const MIXED_THRESHOLD = 40
 const HIGH_THRESHOLD = 65
@@ -249,7 +250,7 @@ function clampScore(value: number): number {
   return Math.max(0, Math.min(100, Math.round(value)))
 }
 
-function classify(score: number): Classification {
+function classifyPatternScore(score: number): Classification {
   if (score >= HIGH_THRESHOLD) return 'high'
   if (score >= MIXED_THRESHOLD) return 'mixed'
   return 'low'
@@ -858,7 +859,7 @@ function scoreSentence(
     detected: false,
     patternScore: score,
     score,
-    classification: classify(score),
+    classification: classifyPatternScore(score),
     signals,
   }
 }
@@ -910,7 +911,7 @@ function applyStatisticalScores(
       likelihood,
       detected,
       score: likelihood,
-      classification: classify(likelihood),
+      classification: classifyDetectedPassageScore(likelihood, detected),
       signals,
     })
   })
@@ -1037,7 +1038,7 @@ function makeFlaggedPassages(
       end: last.end,
       text: text.slice(first.start, last.end),
       score,
-      classification: score >= HIGH_THRESHOLD ? 'high' : 'mixed',
+      classification: classifyDetectedPassageScore(score, true),
       sentenceIds: group.map((sentence) => sentence.id),
       signals: aggregateSignals(group).slice(0, 4),
     }

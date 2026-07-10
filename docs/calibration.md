@@ -22,6 +22,15 @@ Sources: [Turnitin AI Writing Report guide](https://guides.turnitin.com/hc/en-us
 
 Turnitin does not publish its checkpoint, training corpus, sentence threshold, calibration formula, or exact aggregation rule. DraftLens therefore cannot reproduce the proprietary classifier and does not claim score equivalence.
 
+## Passage review bands
+
+`Review` and `Elevated` are DraftLens passage-level display bands, not Turnitin categories and not separate document scores:
+
+- **Review:** the passage crossed the calibrated detection threshold, but its word-weighted local estimate is below 95/100.
+- **Elevated:** the passage has a stronger local match, with a word-weighted local estimate of 95/100 or higher.
+
+Both bands count equally toward detected qualifying-word coverage. They indicate where a reader should inspect the writing and source history in context; neither band establishes AI authorship.
+
 ## Current statistical profile
 
 `ghostbuster-essay-v2` is a standardized logistic model over 22 passage-level style features. It was trained with the openly licensed [Ghostbuster essay corpus](https://github.com/vivek3141/ghostbuster-data) (CC BY 3.0). Prompt/file IDs are kept in one split to prevent the same essay topic leaking across training and test sets. Source essays are not shipped with the app.
