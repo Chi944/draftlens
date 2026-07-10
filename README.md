@@ -1,20 +1,22 @@
 # DraftLens
 
-DraftLens is a private, explainable writing-pattern reviewer. Paste or import a report, get a 0–100 **AI-likeness pattern score**, inspect the exact passages that raised it, and work through concrete coaching for clearer, more specific writing.
+DraftLens is a private, explainable AI-pattern coverage estimator for academic prose. Paste or import a report, review the share of qualifying prose detected by a calibrated local model, inspect reportable passages, and see the observable style evidence around each result.
 
 **Live app:** [draftlens-seven.vercel.app](https://draftlens-seven.vercel.app)
 
 > [!IMPORTANT]
-> The score is a deterministic heuristic—not a probability of AI authorship. DraftLens cannot prove who wrote a document, is not a plagiarism checker, and is not affiliated with Turnitin, QuillBot, or any assessment platform.
+> DraftLens is an independent estimate, not an authorship test. It cannot prove who wrote a document, is not a plagiarism checker, is not affiliated with Turnitin, and does not reproduce Turnitin's proprietary model.
 
 ## What it does
 
 - Reads pasted text and local `.txt`, `.md`, `.docx`, and `.pdf` files up to 10 MB.
-- Calculates an explainable 0–100 writing-pattern score and a separate sample-length confidence rating.
-- Highlights mixed and elevated passages inside the original document.
-- Shows the observable reason for every flag: stock wording, repeated openings or transitions, unusually uniform sentence lengths, abstract wording, nominalizations, and low specificity.
-- Offers passage-aware revision coaching focused on evidence, clarity, specificity, and the writer's own voice.
-- Runs entirely in the browser. A report is not uploaded or stored by DraftLens.
+- Filters headings, list fragments, common table fragments, unsupported-language text, and bibliography entries out of the qualifying-prose denominator.
+- Scores overlapping local windows and reports detected qualifying-word coverage instead of average stylistic intensity.
+- Uses the conservative display states `0%`, `*%` for raw 1-19% results, and exact percentages from 20-100%.
+- Requires at least 300 qualifying words for a reportable result.
+- Highlights detected passages only when the document reaches the 20% reporting line.
+- Retains explainable signals and revision coaching as secondary context.
+- Runs entirely in the browser. DraftLens does not upload or save reports.
 
 ## Run locally
 
@@ -33,49 +35,55 @@ npm run lint
 npm run build
 ```
 
-The analyzer tests cover deterministic score bounds, calibration, sentence offsets, confidence for short samples, flagged-passage grouping, and the product's methodology disclosures.
+The tests cover deterministic score bounds, coverage arithmetic, qualifying-prose exclusions, bibliography invariance, score suppression, sentence offsets, calibration behavior, and document import.
 
-## How the score works
+## How the estimate works
 
-DraftLens uses a fixed, local rule set. Each sentence starts with a small baseline and gains visible signal points when one or more documented patterns occur. Sentence scores are weighted by word count for the report score. Adjacent sentences at or above the review threshold are grouped into selectable passages.
+The version 2 pipeline follows the parts of Turnitin's workflow that are publicly documented without claiming access to its proprietary classifier:
 
-| Score | Label | Meaning |
+1. Identify qualifying English long-form prose.
+2. Analyze overlapping windows of approximately 5-10 sentences.
+3. Average the window estimates for every qualifying sentence.
+4. Mark sentences above a conservative, validation-derived threshold.
+5. Report detected qualifying words divided by all qualifying words.
+
+| Raw coverage | Display | Meaning |
 | ---: | --- | --- |
-| 0–39 | Few signals | Few of the tracked formulaic patterns appear. |
-| 40–64 | Mixed signals | A noticeable concentration deserves review. |
-| 65–100 | Elevated signals | A strong concentration of tracked patterns appears. |
+| 0% | `0%` | No qualifying passage crossed the calibrated threshold. |
+| 1-19% | `*%` | Exact score and highlights are suppressed because isolated low-coverage results are less reliable. |
+| 20-49% | Exact | A reportable share of qualifying prose was detected. |
+| 50-100% | Exact | A high share of qualifying prose was detected. |
 
-Confidence is deliberately separate from the score and rises with the amount of analyzable text. A short sample can match a pattern strongly while still offering weak evidence overall.
+The secondary pattern-intensity metric still summarizes visible stock phrasing, repeated openings and transitions, sentence-length uniformity, abstract wording, nominalizations, and low specificity. It is not used as the headline percentage.
 
-The implementation lives in [`src/lib/analyzer.ts`](src/lib/analyzer.ts), and the typed result contract is in [`src/lib/types.ts`](src/lib/types.ts).
+## Calibration
+
+The bundled `ghostbuster-essay-v2` profile is a compact logistic model over 22 passage-level features, trained with the CC BY 3.0 [Ghostbuster essay corpus](https://github.com/vivek3141/ghostbuster-data). Documents were split by prompt/file ID to prevent topic leakage. No source essay is bundled into the application.
+
+On the held-out corpus, the profile produced 0.926 window ROC-AUC, about 0.6% human-document false positives at the 20% reporting line, and 65.0% AI-document recall. These are benchmark-specific results, not a promise of real-world or Turnitin-equivalent accuracy.
+
+See [calibration and concordance](docs/calibration.md) for model provenance, public paired-report anchors, evaluation design, and release gates.
 
 ## Responsible interpretation
 
-AI-text detection is an uncertain classification problem. More text generally improves the available evidence, and false positives remain possible. Turnitin itself notes that short submissions can be less accurate and that an AI-writing score should not be the sole basis for adverse action. Research also shows that reliable detection depends on the data distribution, detector, and available sample size.
+AI-text detection is an uncertain classification problem. Formal, technical, translated, template-based, or heavily edited human prose can resemble machine-generated prose, while newer models and paraphrasing can evade detection. Use the result as a review prompt:
 
-Use DraftLens as an editing conversation starter:
+1. Read every surfaced passage in context.
+2. Compare it with notes, sources, and earlier drafts.
+3. Ask the writer to explain the reasoning where appropriate.
+4. Never use the percentage as the sole basis for an adverse decision.
 
-1. Inspect the highlighted wording and the stated reason.
-2. Check the claim against notes, sources, and firsthand reasoning.
-3. Revise only when the suggestion makes the report more accurate and genuinely yours.
-4. Keep drafts, source notes, and version history when authorship may matter.
-
-Do not use a DraftLens score as evidence of misconduct or as a promise that another detector will return a particular result.
-
-## Reference context
-
-- [Turnitin AI writing detection release notes](https://guides.turnitin.com/hc/en-us/articles/28294949544717-AI-writing-detection-model) describe passage highlighting, a percentage over qualifying text, paraphrasing categories, and cautions around false positives and short submissions.
-- [Chakraborty et al., ICML 2024](https://proceedings.mlr.press/v235/chakraborty24a.html) discuss the relationship between text quantity and detection reliability.
-- [Tufts, Zhao, and Li, 2024](https://arxiv.org/abs/2412.05139) evaluate detector performance across unseen domains, models, and prompting strategies.
-
-These sources inform the product's caution and interface conventions. DraftLens does not reproduce their proprietary models or claim comparable accuracy.
+Do not revise text merely to change a detector score. Keep changes accurate and reflective of the writer's own reasoning.
 
 ## Tech stack
 
 - React + TypeScript + Vite
-- `pdfjs-dist` for local PDF text extraction
-- `mammoth` for local DOCX text extraction
-- Vitest for the analyzer and import test suite
+- `pdfjs-dist` for local PDF extraction
+- `mammoth` for local DOCX extraction
+- A deterministic, browser-side statistical profile with no runtime API call
+- Vitest for analyzer and import tests
+
+The analyzer is in [`src/lib/analyzer.ts`](src/lib/analyzer.ts), the feature extractor is in [`src/lib/statistical-features.ts`](src/lib/statistical-features.ts), and the generated profile is in [`src/data/calibration-profile.ts`](src/data/calibration-profile.ts).
 
 ## License
 

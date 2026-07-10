@@ -2,6 +2,17 @@ export type Classification = 'low' | 'mixed' | 'high'
 
 export type ConfidenceLevel = 'low' | 'medium' | 'high'
 
+export type ScoreStatus =
+  | 'exact'
+  | 'below-reporting-threshold'
+  | 'insufficient-prose'
+  | 'out-of-range'
+
+export type ExclusionReason =
+  | 'non-prose'
+  | 'bibliography'
+  | 'unsupported-language'
+
 export type SignalId =
   | 'stock-phrases'
   | 'repetitive-openings'
@@ -10,6 +21,7 @@ export type SignalId =
   | 'abstract-language'
   | 'nominalized-language'
   | 'low-specificity'
+  | 'statistical-pattern'
 
 export interface WritingSignal {
   id: SignalId
@@ -30,6 +42,15 @@ export interface SentenceAnalysis {
   /** Exclusive UTF-16 offset immediately after the sentence. */
   end: number
   wordCount: number
+  /** Whether this sentence contributes to the long-form-prose denominator. */
+  qualifies: boolean
+  exclusionReason?: ExclusionReason
+  /** Local statistical estimate from overlapping passage windows. */
+  likelihood: number
+  /** Whether the local estimate crossed the calibrated detection threshold. */
+  detected: boolean
+  /** Explainable style-pattern intensity, retained as a secondary diagnostic. */
+  patternScore: number
   score: number
   classification: Classification
   signals: WritingSignal[]
@@ -66,7 +87,12 @@ export interface AnalysisConfidence {
 export interface AnalysisStats {
   characterCount: number
   wordCount: number
+  qualifyingWordCount: number
+  excludedWordCount: number
+  detectedWordCount: number
   sentenceCount: number
+  qualifyingSentenceCount: number
+  detectedSentenceCount: number
   paragraphCount: number
   averageSentenceLength: number
   /** Coefficient of variation, expressed as a 0-100 percentage. */
@@ -75,6 +101,20 @@ export interface AnalysisStats {
   flaggedPassageCount: number
   /** Case-insensitive unique-word share, expressed as a 0-100 percentage. */
   uniqueWordRatio: number
+}
+
+export interface CoverageResult {
+  /** Raw detected-word coverage, even when product policy suppresses display. */
+  rawPercent: number
+  /** Null when the exact result should not be shown. */
+  displayedPercent: number | null
+  displayLabel: string
+  status: ScoreStatus
+  qualifyingWordCount: number
+  detectedWordCount: number
+  excludedWordCount: number
+  qualifyingSentenceCount: number
+  detectedSentenceCount: number
 }
 
 export interface RevisionCoaching {
@@ -90,16 +130,22 @@ export interface RevisionCoaching {
 export interface AnalysisMethodology {
   name: string
   version: string
-  kind: 'deterministic-writing-pattern-heuristic'
+  kind:
+    | 'deterministic-writing-pattern-heuristic'
+    | 'calibrated-writing-pattern-estimator'
   description: string
   scoreMeaning: string
   thresholds: Record<Classification, string>
   heuristics: string[]
+  profileId?: string
 }
 
 export interface AnalysisResult {
-  /** A 0-100 heuristic writing-pattern score, not a probability of AI authorship. */
+  /** Detected qualifying-prose word coverage, not a probability of authorship. */
   score: number
+  coverage: CoverageResult
+  /** Mean explainable style-pattern intensity over qualifying prose. */
+  patternIntensity: number
   classification: Classification
   confidence: AnalysisConfidence
   summary: string

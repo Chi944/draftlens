@@ -4,6 +4,8 @@ import type {
   AnalysisResult,
   AnalysisStats,
   Classification,
+  CoverageResult,
+  ExclusionReason,
   FlaggedPassage,
   RevisionCoaching,
   SentenceAnalysis,
@@ -11,9 +13,18 @@ import type {
   TopSignal,
   WritingSignal,
 } from './types'
+import {
+  CALIBRATION_PROFILE,
+  createStatisticalWindowRanges,
+  scoreStatisticalWindow,
+} from './statistical-features'
 
 const MIXED_THRESHOLD = 40
 const HIGH_THRESHOLD = 65
+const COVERAGE_REVIEW_THRESHOLD = 20
+const COVERAGE_HIGH_THRESHOLD = 50
+const MIN_QUALIFYING_WORDS = 300
+const MAX_QUALIFYING_WORDS = 30_000
 
 const SIGNAL_DEFINITIONS: Record<
   SignalId,
@@ -53,6 +64,11 @@ const SIGNAL_DEFINITIONS: Record<
     label: 'Low specificity',
     description:
       'Makes abstract claims without concrete markers such as names, numbers, quotations, or firsthand observations.',
+  },
+  'statistical-pattern': {
+    label: 'Calibrated passage pattern',
+    description:
+      'An overlapping passage window matched statistical patterns learned from openly licensed human and AI essay examples.',
   },
 }
 
@@ -161,19 +177,22 @@ const TERMINAL_CAPABLE_ABBREVIATIONS = new Set([
 ])
 
 const METHODOLOGY: AnalysisMethodology = {
-  name: 'DraftLens writing-pattern heuristic',
-  version: '1.0',
-  kind: 'deterministic-writing-pattern-heuristic',
+  name: 'DraftLens qualifying-prose coverage estimator',
+  version: '2.0',
+  kind: 'calibrated-writing-pattern-estimator',
   description:
-    'A local, rule-based review of visible writing patterns. The same text always produces the same result.',
+    'A local estimator that filters for long-form prose, scores overlapping passage windows, and reports detected-word coverage. The same text always produces the same result.',
   scoreMeaning:
-    'The 0-100 score indicates how strongly this draft matches the listed writing patterns. It is not a probability that AI wrote the text.',
+    'The percentage is the share of qualifying prose words inside passages that crossed DraftLens\' calibrated statistical threshold. It is not the probability that AI wrote the document.',
   thresholds: {
-    low: '0-39: few of the tracked patterns',
-    mixed: '40-64: a noticeable concentration of tracked patterns',
-    high: '65-100: a strong concentration of tracked patterns',
+    low: '0 or a suppressed raw result from 1-19%',
+    mixed: '20-49% of qualifying prose words detected',
+    high: '50-100% of qualifying prose words detected',
   },
   heuristics: [
+    'Qualifying long-form prose only; references and non-prose are excluded',
+    'Overlapping local windows of 5-10 sentences',
+    'A versioned statistical calibration trained on openly licensed human and AI essays',
     'Recognizable stock phrases',
     'Repeated sentence openings',
     'Unusually uniform sentence lengths',
@@ -186,10 +205,11 @@ const METHODOLOGY: AnalysisMethodology = {
 
 const LIMITATIONS = [
   'DraftLens is an independent writing-pattern tool. It is not Turnitin, is not affiliated with Turnitin, and does not reproduce any proprietary detector.',
-  'This score cannot establish authorship or prove that text was written by AI or by a person.',
+  'This coverage estimate cannot establish authorship or prove that text was written by AI or by a person.',
   'Formal, technical, translated, template-based, or heavily edited human writing may trigger the same patterns.',
-  'Short samples produce less reliable pattern counts; use the separate confidence rating when interpreting the score.',
-  'The analyzer uses fixed rules rather than a trained model or proprietary comparison corpus.',
+  'Fewer than 300 qualifying words are outside the supported range and do not receive a reportable percentage.',
+  'Scores from 1-19% are suppressed because low-coverage highlights carry a higher false-positive risk.',
+  'The statistical profile uses public research data and is smaller than a production transformer model; domain and model drift remain important limitations.',
   'Revision coaching is intended to improve clarity, specificity, and personal voice. It does not promise to change or bypass any third-party detector score.',
 ]
 
@@ -209,12 +229,20 @@ interface SentenceDraft extends SentenceSpan {
   index: number
   words: string[]
   wordCount: number
+  qualifies: boolean
+  exclusionReason?: ExclusionReason
   openingKey?: string
   openingEvidence?: string
   transition?: TransitionMatch
   stockEvidence: string[]
   abstractEvidence: string[]
   nominalizationEvidence: string[]
+}
+
+interface LineAssessment {
+  start: number
+  end: number
+  reason?: ExclusionReason
 }
 
 function clampScore(value: number): number {
@@ -373,7 +401,256 @@ function findTransition(text: string): TransitionMatch | undefined {
   }
 }
 
-function makeSentenceDraft(span: SentenceSpan, index: number): SentenceDraft {
+const REFERENCE_HEADING_PATTERN =
+  /^\s*(?:\d{1,4}\s+)?(?:references?|referencias|referensi|références|bibliography|works\s+cited|reference\s+list|daftar\s+pustaka|literaturverzeichnis)\b\s*:?/iu
+const LIST_ITEM_PATTERN = /^\s*(?:[-*\u2022\u25aa\u25e6]|\d{1,3}[.)]|[a-z][.)])\s+/iu
+const PAGE_NUMBER_PATTERN =
+  /^\s*(?:page\s+)?\d{1,4}(?:\s+(?:of|\/|-|\u2013)\s*\d{1,4})?\s*$/iu
+const TOC_PATTERN = /\.{3,}\s*\d{1,4}\s*$/u
+const CODE_START_PATTERN =
+  /^\s*(?:```|~~~|(?:export\s+)?(?:async\s+)?function\b|(?:const|let|var|class|interface|type)\s+[\w$]+\s*(?:[=:<{(]))/u
+
+const ENGLISH_FUNCTION_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'are',
+  'as',
+  'at',
+  'be',
+  'been',
+  'by',
+  'for',
+  'from',
+  'had',
+  'has',
+  'have',
+  'in',
+  'is',
+  'it',
+  'of',
+  'on',
+  'or',
+  'that',
+  'the',
+  'their',
+  'this',
+  'to',
+  'was',
+  'were',
+  'which',
+  'with',
+])
+
+const NON_ENGLISH_FUNCTION_WORDS = new Set([
+  'adalah',
+  'atau',
+  'dalam',
+  'dan',
+  'dari',
+  'dengan',
+  'ini',
+  'pada',
+  'untuk',
+  'yang',
+  'de',
+  'del',
+  'el',
+  'en',
+  'la',
+  'las',
+  'los',
+  'para',
+  'por',
+  'que',
+  'una',
+  'une',
+  'des',
+  'dans',
+  'les',
+  'pour',
+])
+
+function looksLikeUnsupportedLanguage(text: string): boolean {
+  if (/\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}/u.test(text)) {
+    return true
+  }
+
+  const words = wordsIn(text).map((word) => word.toLowerCase())
+  if (words.length < 6) return false
+
+  const englishCount = words.filter((word) =>
+    ENGLISH_FUNCTION_WORDS.has(word),
+  ).length
+  const otherCount = words.filter((word) =>
+    NON_ENGLISH_FUNCTION_WORDS.has(word),
+  ).length
+
+  return otherCount >= 2 && otherCount > englishCount
+}
+
+function looksLikeHeading(line: string, wordCount: number): boolean {
+  if (wordCount === 0 || wordCount > 30) return false
+  if (/[.!?]["'\u201d\u2019)}\]]*\s*$/u.test(line)) return false
+  const allCapsLetters = line.match(/\p{L}/gu)?.join('') ?? ''
+  if (
+    allCapsLetters.length >= 3 &&
+    allCapsLetters === allCapsLetters.toUpperCase()
+  ) {
+    return true
+  }
+  if (wordCount > 14) return false
+  if (/[:\u2014-]\s*$/u.test(line) && wordCount <= 12) return true
+  if (wordCount <= 5) return true
+
+  const words = wordsIn(line)
+  const casedWords = words.filter((word) => /\p{L}/u.test(word))
+  const titleCaseWords = casedWords.filter((word) => /^\p{Lu}/u.test(word))
+
+  return (
+    casedWords.length > 0 &&
+    titleCaseWords.length / casedWords.length >= 0.75
+  )
+}
+
+function assessLines(text: string): LineAssessment[] {
+  const assessments: LineAssessment[] = []
+  const linePattern = /[^\r\n]*(?:\r\n|\r|\n|$)/gu
+  let bibliographyStarted = false
+  let inCodeFence = false
+
+  for (const match of text.matchAll(linePattern)) {
+    if (match.index === undefined || match[0].length === 0) continue
+    const rawLine = match[0]
+    const line = rawLine.replace(/[\r\n]+$/u, '')
+    const start = match.index
+    const end = start + line.length
+    const trimmed = line.trim()
+    const wordCount = wordsIn(trimmed).length
+    let reason: ExclusionReason | undefined
+
+    const referenceHeading = trimmed.match(REFERENCE_HEADING_PATTERN)
+    const referenceRemainder = referenceHeading
+      ? trimmed.slice(referenceHeading[0].length).trim()
+      : ''
+    if (
+      referenceHeading &&
+      start >= text.length * 0.1 &&
+      !/^(?:\.{2,}\s*)?\d{1,4}$/u.test(referenceRemainder)
+    ) {
+      bibliographyStarted = true
+    }
+
+    if (bibliographyStarted) {
+      reason = 'bibliography'
+    } else if (/^\s*(?:```|~~~)/u.test(trimmed)) {
+      inCodeFence = !inCodeFence
+      reason = 'non-prose'
+    } else if (inCodeFence || CODE_START_PATTERN.test(trimmed)) {
+      reason = 'non-prose'
+    } else if (!trimmed) {
+      reason = 'non-prose'
+    } else if (
+      PAGE_NUMBER_PATTERN.test(trimmed) ||
+      TOC_PATTERN.test(trimmed) ||
+      LIST_ITEM_PATTERN.test(trimmed) ||
+      /^\s*(?:name|student\s+id|program(?:\s+studi)?|title|type\s+of\s+submission|signature|date|faculty|university|place\s+of\s+approval|npm|tanda\s+tangan|tahun\s+akademik)\s*:/iu.test(
+        trimmed,
+      ) ||
+      /^\s*(?:https?:\/\/|www\.|doi\s*:|submission\s+id\b|file\s+name\b)/iu.test(
+        trimmed,
+      )
+    ) {
+      reason = 'non-prose'
+    } else {
+      const tableSeparators =
+        (trimmed.match(/\t/gu)?.length ?? 0) +
+        (trimmed.match(/\|/gu)?.length ?? 0)
+      const terminalMarks = trimmed.match(/[.!?](?:\s|$)/gu)?.length ?? 0
+      if (tableSeparators >= 2 && (wordCount < 40 || terminalMarks < 2)) {
+        reason = 'non-prose'
+      } else if (looksLikeUnsupportedLanguage(trimmed)) {
+        reason = 'unsupported-language'
+      } else if (looksLikeHeading(trimmed, wordCount)) {
+        reason = 'non-prose'
+      }
+    }
+
+    assessments.push({ start, end, ...(reason ? { reason } : {}) })
+  }
+
+  return assessments
+}
+
+function qualifySentence(
+  span: SentenceSpan,
+  lines: LineAssessment[],
+): { qualifies: boolean; exclusionReason?: ExclusionReason } {
+  const letters = span.text.match(/\p{L}/gu) ?? []
+  const uppercaseLetters = letters.filter((letter) =>
+    /\p{Lu}/u.test(letter),
+  ).length
+  const terminalCount = span.text.match(/[.!?](?:\s|$)/gu)?.length ?? 0
+  const metadataLabelCount =
+    span.text.match(
+      /\b(?:name|student\s+id|program(?:\s+studi)?|title|type\s+of\s+submission|signature|date|faculty|university|place\s+of\s+approval|npm|tanda\s+tangan|tahun\s+akademik)\s*:/giu,
+    )?.length ?? 0
+  const tocEntryCount = span.text.match(/\.{3,}\s*\d{1,4}/gu)?.length ?? 0
+
+  if (
+    (letters.length >= 20 &&
+      terminalCount === 0 &&
+      uppercaseLetters / letters.length >= 0.6) ||
+    (metadataLabelCount >= 3 && terminalCount <= 2) ||
+    tocEntryCount >= 3
+  ) {
+    return { qualifies: false, exclusionReason: 'non-prose' }
+  }
+
+  const overlapping = lines.filter(
+    (line) => line.end > span.start && line.start < span.end,
+  )
+  let qualifyingWords = 0
+  const excludedWords = new Map<ExclusionReason, number>()
+
+  overlapping.forEach((line) => {
+    const start = Math.max(span.start, line.start)
+    const end = Math.min(span.end, line.end)
+    const count = wordsIn(span.text.slice(start - span.start, end - span.start)).length
+    if (!line.reason) {
+      qualifyingWords += count
+      return
+    }
+    excludedWords.set(line.reason, (excludedWords.get(line.reason) ?? 0) + count)
+  })
+
+  const excludedWordCount = [...excludedWords.values()].reduce(
+    (sum, count) => sum + count,
+    0,
+  )
+
+  if (qualifyingWords > 0 && qualifyingWords >= excludedWordCount) {
+    if (looksLikeUnsupportedLanguage(span.text)) {
+      return { qualifies: false, exclusionReason: 'unsupported-language' }
+    }
+    return { qualifies: true }
+  }
+
+  const exclusionReason = [...excludedWords.entries()].sort(
+    (left, right) => right[1] - left[1],
+  )[0]?.[0]
+
+  return {
+    qualifies: false,
+    exclusionReason: exclusionReason ?? 'non-prose',
+  }
+}
+
+function makeSentenceDraft(
+  span: SentenceSpan,
+  index: number,
+  lines: LineAssessment[],
+): SentenceDraft {
   const words = wordsIn(span.text)
   const normalizedWords = words.map((word) => word.toLowerCase())
   const transition = findTransition(span.text)
@@ -388,12 +665,14 @@ function makeSentenceDraft(span: SentenceSpan, index: number): SentenceDraft {
       (word) => word.length >= 7 && NOMINALIZATION_PATTERN.test(word),
     ),
   )
+  const qualification = qualifySentence(span, lines)
 
   return {
     ...span,
     index,
     words,
     wordCount: words.length,
+    ...qualification,
     openingKey:
       openingWords.length === 3
         ? openingWords.map((word) => word.toLowerCase()).join(' ')
@@ -455,6 +734,27 @@ function scoreSentence(
   uniformLengthImpact: number,
 ): SentenceAnalysis {
   const signals: WritingSignal[] = []
+
+  if (!draft.qualifies) {
+    return {
+      id: `sentence-${draft.index + 1}`,
+      index: draft.index,
+      text: draft.text,
+      start: draft.start,
+      end: draft.end,
+      wordCount: draft.wordCount,
+      qualifies: false,
+      ...(draft.exclusionReason
+        ? { exclusionReason: draft.exclusionReason }
+        : {}),
+      likelihood: 0,
+      detected: false,
+      patternScore: 0,
+      score: 0,
+      classification: 'low',
+      signals: [],
+    }
+  }
 
   if (draft.stockEvidence.length > 0) {
     signals.push(
@@ -553,10 +853,69 @@ function scoreSentence(
     start: draft.start,
     end: draft.end,
     wordCount: draft.wordCount,
+    qualifies: true,
+    likelihood: 0,
+    detected: false,
+    patternScore: score,
     score,
     classification: classify(score),
     signals,
   }
+}
+
+function applyStatisticalScores(
+  sentences: SentenceAnalysis[],
+): SentenceAnalysis[] {
+  const qualifying = sentences.filter((sentence) => sentence.qualifies)
+  if (qualifying.length === 0) return sentences
+
+  const probabilitySums = new Array<number>(qualifying.length).fill(0)
+  const windowCounts = new Array<number>(qualifying.length).fill(0)
+
+  const ranges = createStatisticalWindowRanges(qualifying.length, 7, 3, 5)
+  if (ranges.length === 0) ranges.push({ start: 0, end: qualifying.length })
+
+  ranges.forEach(({ start, end }) => {
+    const probability = scoreStatisticalWindow(
+      qualifying
+        .slice(start, end)
+        .map((sentence) => sentence.text)
+        .join(' '),
+    )
+    for (let index = start; index < end; index += 1) {
+      probabilitySums[index] += probability
+      windowCounts[index] += 1
+    }
+  })
+
+  const scoredById = new Map<string, SentenceAnalysis>()
+  qualifying.forEach((sentence, index) => {
+    const probability =
+      windowCounts[index] === 0
+        ? 0
+        : probabilitySums[index] / windowCounts[index]
+    const likelihood = clampScore(probability * 100)
+    const detected = probability >= CALIBRATION_PROFILE.detectionThreshold
+    const signals = detected
+      ? [
+          ...sentence.signals,
+          makeSignal('statistical-pattern', 20, [
+            `${likelihood}% local estimate across ${windowCounts[index]} overlapping passage window${windowCounts[index] === 1 ? '' : 's'}`,
+          ]),
+        ]
+      : sentence.signals
+
+    scoredById.set(sentence.id, {
+      ...sentence,
+      likelihood,
+      detected,
+      score: likelihood,
+      classification: classify(likelihood),
+      signals,
+    })
+  })
+
+  return sentences.map((sentence) => scoredById.get(sentence.id) ?? sentence)
 }
 
 function aggregateSignals(sentences: SentenceAnalysis[]): TopSignal[] {
@@ -619,23 +978,53 @@ function weightedScore(sentences: SentenceAnalysis[]): number {
   )
 }
 
+function weightedPatternScore(sentences: SentenceAnalysis[]): number {
+  const qualifying = sentences.filter((sentence) => sentence.qualifies)
+  const totalWeight = qualifying.reduce(
+    (sum, sentence) => sum + Math.max(1, sentence.wordCount),
+    0,
+  )
+  if (totalWeight === 0) return 0
+
+  return clampScore(
+    qualifying.reduce(
+      (sum, sentence) =>
+        sum + sentence.patternScore * Math.max(1, sentence.wordCount),
+      0,
+    ) / totalWeight,
+  )
+}
+
 function makeFlaggedPassages(
   text: string,
   sentences: SentenceAnalysis[],
 ): FlaggedPassage[] {
   const groups: SentenceAnalysis[][] = []
   let current: SentenceAnalysis[] = []
+  let currentWords = 0
+
+  const flush = () => {
+    if (current.length > 0) groups.push(current)
+    current = []
+    currentWords = 0
+  }
 
   sentences.forEach((sentence) => {
-    if (sentence.classification !== 'low') {
+    if (sentence.qualifies && sentence.detected) {
+      if (
+        current.length >= 8 ||
+        (current.length > 0 && currentWords + sentence.wordCount > 240)
+      ) {
+        flush()
+      }
       current.push(sentence)
+      currentWords += sentence.wordCount
       return
     }
 
-    if (current.length > 0) groups.push(current)
-    current = []
+    flush()
   })
-  if (current.length > 0) groups.push(current)
+  flush()
 
   return groups.map((group, index) => {
     const first = group[0]
@@ -655,13 +1044,97 @@ function makeFlaggedPassages(
   })
 }
 
+function classifyCoverage(score: number): Classification {
+  if (score >= COVERAGE_HIGH_THRESHOLD) return 'high'
+  if (score >= COVERAGE_REVIEW_THRESHOLD) return 'mixed'
+  return 'low'
+}
+
+function makeCoverage(
+  text: string,
+  sentences: SentenceAnalysis[],
+): CoverageResult {
+  const qualifying = sentences.filter((sentence) => sentence.qualifies)
+  const qualifyingWordCount = qualifying.reduce(
+    (sum, sentence) => sum + sentence.wordCount,
+    0,
+  )
+  const detected = qualifying.filter((sentence) => sentence.detected)
+  const detectedWordCount = detected.reduce(
+    (sum, sentence) => sum + sentence.wordCount,
+    0,
+  )
+  const excludedWordCount = Math.max(
+    0,
+    wordsIn(text).length - qualifyingWordCount,
+  )
+  const rawPercent =
+    qualifyingWordCount === 0
+      ? 0
+      : clampScore((detectedWordCount / qualifyingWordCount) * 100)
+
+  if (qualifyingWordCount < MIN_QUALIFYING_WORDS) {
+    return {
+      rawPercent,
+      displayedPercent: null,
+      displayLabel: 'Not enough prose',
+      status: 'insufficient-prose',
+      qualifyingWordCount,
+      detectedWordCount,
+      excludedWordCount,
+      qualifyingSentenceCount: qualifying.length,
+      detectedSentenceCount: detected.length,
+    }
+  }
+
+  if (qualifyingWordCount > MAX_QUALIFYING_WORDS) {
+    return {
+      rawPercent,
+      displayedPercent: null,
+      displayLabel: 'Outside range',
+      status: 'out-of-range',
+      qualifyingWordCount,
+      detectedWordCount,
+      excludedWordCount,
+      qualifyingSentenceCount: qualifying.length,
+      detectedSentenceCount: detected.length,
+    }
+  }
+
+  if (rawPercent > 0 && rawPercent < COVERAGE_REVIEW_THRESHOLD) {
+    return {
+      rawPercent,
+      displayedPercent: null,
+      displayLabel: '*%',
+      status: 'below-reporting-threshold',
+      qualifyingWordCount,
+      detectedWordCount,
+      excludedWordCount,
+      qualifyingSentenceCount: qualifying.length,
+      detectedSentenceCount: detected.length,
+    }
+  }
+
+  return {
+    rawPercent,
+    displayedPercent: rawPercent,
+    displayLabel: `${rawPercent}%`,
+    status: 'exact',
+    qualifyingWordCount,
+    detectedWordCount,
+    excludedWordCount,
+    qualifyingSentenceCount: qualifying.length,
+    detectedSentenceCount: detected.length,
+  }
+}
+
 function makeConfidence(
   wordCount: number,
   sentenceCount: number,
 ): AnalysisConfidence {
   const score = clampScore(
-    Math.min(70, (wordCount / 200) * 70) +
-      Math.min(30, (sentenceCount / 8) * 30),
+    Math.min(75, (wordCount / 1_000) * 75) +
+      Math.min(25, (sentenceCount / 40) * 25),
   )
 
   if (wordCount === 0) {
@@ -669,25 +1142,25 @@ function makeConfidence(
       level: 'low',
       score: 0,
       label: 'No sample',
-      reason: 'Add report text before interpreting a writing-pattern score.',
+      reason: 'No qualifying long-form prose was available for this estimate.',
     }
   }
 
-  if (wordCount < 75 || sentenceCount < 3) {
+  if (wordCount < MIN_QUALIFYING_WORDS) {
     return {
       level: 'low',
       score,
       label: 'Low confidence',
-      reason: `Only ${wordCount} words across ${sentenceCount} sentence${sentenceCount === 1 ? '' : 's'} were available; treat the score as especially tentative.`,
+      reason: `Only ${wordCount} qualifying words across ${sentenceCount} sentence${sentenceCount === 1 ? '' : 's'} were available; at least ${MIN_QUALIFYING_WORDS} are required for a reportable estimate.`,
     }
   }
 
-  if (wordCount < 200 || sentenceCount < 8) {
+  if (wordCount < 1_000 || sentenceCount < 30) {
     return {
       level: 'medium',
       score,
       label: 'Medium confidence',
-      reason: `${wordCount} words across ${sentenceCount} sentences reveal some patterns, but a broader sample would stabilize repetition and rhythm measures.`,
+      reason: `${wordCount} qualifying words across ${sentenceCount} sentences support an estimate, but a broader sample would stabilize passage-level variation.`,
     }
   }
 
@@ -695,7 +1168,7 @@ function makeConfidence(
     level: 'high',
     score,
     label: 'Higher confidence',
-    reason: `${wordCount} words across ${sentenceCount} sentences provide enough material to compare repeated wording and sentence-length patterns.`,
+    reason: `${wordCount} qualifying words across ${sentenceCount} sentences provide multiple overlapping windows for the local estimator.`,
   }
 }
 
@@ -756,6 +1229,13 @@ const COACHING_BY_SIGNAL: Record<
     action:
       'Add accurate names, dates, quantities, source observations, constraints, or a brief firsthand explanation. Never invent detail merely to change a score.',
   },
+  'statistical-pattern': {
+    title: 'Review the passage in context',
+    rationale:
+      'The local passage crossed a calibrated statistical threshold, but that result does not identify its author or a single decisive phrase.',
+    action:
+      'Compare the passage with notes, sources, and earlier drafts. Revise only where the wording does not accurately reflect the writer\'s own reasoning or evidence.',
+  },
 }
 
 function makeCoaching(topSignals: TopSignal[]): RevisionCoaching[] {
@@ -770,113 +1250,161 @@ function makeCoaching(topSignals: TopSignal[]): RevisionCoaching[] {
 }
 
 function makeSummary(
-  score: number,
-  classification: Classification,
+  coverage: CoverageResult,
   confidence: AnalysisConfidence,
 ): string {
   if (confidence.score === 0) {
-    return 'Add report text to review its writing patterns.'
+    return 'No qualifying long-form prose was available for analysis.'
   }
 
-  const concentration =
-    classification === 'high'
-      ? 'a strong concentration'
-      : classification === 'mixed'
-        ? 'a noticeable concentration'
-        : 'few'
+  if (coverage.status === 'insufficient-prose') {
+    return `${coverage.qualifyingWordCount} qualifying words were found; at least ${MIN_QUALIFYING_WORDS} are required for a reportable estimate.`
+  }
+  if (coverage.status === 'out-of-range') {
+    return `${coverage.qualifyingWordCount} qualifying words exceed the ${MAX_QUALIFYING_WORDS.toLocaleString()}-word supported range.`
+  }
+  if (coverage.status === 'below-reporting-threshold') {
+    return `Some passage-level patterns were detected, but the exact result is suppressed below ${COVERAGE_REVIEW_THRESHOLD}% because low-coverage highlights are less reliable.`
+  }
 
-  return `${score}/100 indicates ${concentration} of the tracked writing patterns. This is a ${confidence.level}-confidence writing aid, not proof of AI authorship.`
+  return `${coverage.rawPercent}% of ${coverage.qualifyingWordCount.toLocaleString()} qualifying prose words fell inside detected passages. This is a ${confidence.level}-confidence estimate, not proof of AI authorship.`
 }
 
 function makeStats(
   text: string,
   sentences: SentenceAnalysis[],
   passages: FlaggedPassage[],
+  coverage: CoverageResult,
 ): AnalysisStats {
   const allWords = wordsIn(text)
-  const normalizedWords = allWords.map((word) => word.toLowerCase())
+  const qualifyingSentences = sentences.filter((sentence) => sentence.qualifies)
+  const qualifyingWords = qualifyingSentences.flatMap((sentence) =>
+    wordsIn(sentence.text),
+  )
+  const normalizedWords = qualifyingWords.map((word) => word.toLowerCase())
   const trimmed = text.trim()
   const paragraphCount = trimmed
     ? trimmed.split(/\r?\n\s*\r?\n+/u).filter((paragraph) => /\S/u.test(paragraph))
         .length
     : 0
   const averageSentenceLength =
-    sentences.length === 0 ? 0 : allWords.length / sentences.length
+    qualifyingSentences.length === 0
+      ? 0
+      : coverage.qualifyingWordCount / qualifyingSentences.length
 
   return {
     characterCount: trimmed.length,
     wordCount: allWords.length,
+    qualifyingWordCount: coverage.qualifyingWordCount,
+    excludedWordCount: coverage.excludedWordCount,
+    detectedWordCount: coverage.detectedWordCount,
     sentenceCount: sentences.length,
+    qualifyingSentenceCount: coverage.qualifyingSentenceCount,
+    detectedSentenceCount: coverage.detectedSentenceCount,
     paragraphCount,
     averageSentenceLength: Math.round(averageSentenceLength * 10) / 10,
     sentenceLengthVariation: Math.round(
-      lengthVariation(sentences.map((sentence) => sentence.wordCount)) * 100,
+      lengthVariation(
+        qualifyingSentences.map((sentence) => sentence.wordCount),
+      ) * 100,
     ),
-    flaggedSentenceCount: sentences.filter(
-      (sentence) => sentence.classification !== 'low',
-    ).length,
+    flaggedSentenceCount: coverage.detectedSentenceCount,
     flaggedPassageCount: passages.length,
     uniqueWordRatio:
-      allWords.length === 0
+      qualifyingWords.length === 0
         ? 0
-        : Math.round((new Set(normalizedWords).size / allWords.length) * 100),
+        : Math.round(
+            (new Set(normalizedWords).size / qualifyingWords.length) * 100,
+          ),
   }
 }
 
 /**
- * Produces a deterministic, explainable writing-pattern estimate.
- * It does not call an AI model, determine authorship, or reproduce Turnitin.
+ * Produces a deterministic, local qualifying-prose coverage estimate.
+ * It does not call a remote AI service, determine authorship, or reproduce Turnitin.
  */
 export function analyzeText(text: string): AnalysisResult {
-  const drafts = splitSentences(text).map(makeSentenceDraft)
-  const openingCounts = occurrenceCounts(
-    drafts.map((sentence) => sentence.openingKey),
+  const lines = assessLines(text)
+  const drafts = splitSentences(text).map((span, index) =>
+    makeSentenceDraft(span, index, lines),
   )
-  const transitionCounts = occurrenceCounts(
-    drafts.map((sentence) => sentence.transition?.key),
+  const qualifyingDrafts = drafts.filter((draft) => draft.qualifies)
+  const qualifyingPositions = new Map(
+    qualifyingDrafts.map((draft, index) => [draft.index, index]),
   )
-  const variation = lengthVariation(drafts.map((sentence) => sentence.wordCount))
-  const averageLength =
-    drafts.length === 0
-      ? 0
-      : drafts.reduce((sum, sentence) => sum + sentence.wordCount, 0) /
-        drafts.length
-  const uniformLengthImpact =
-    drafts.length >= 4 && averageLength >= 6 && variation <= 0.22
-      ? variation <= 0.1
-        ? 14
-        : variation <= 0.17
-          ? 11
-          : 8
-      : 0
 
-  const sentences = drafts.map((draft) =>
-    scoreSentence(
+  const patternSentences = drafts.map((draft) => {
+    const qualifyingPosition = qualifyingPositions.get(draft.index)
+    if (qualifyingPosition === undefined) {
+      return scoreSentence(draft, new Map(), new Map(), 0)
+    }
+
+    const localDrafts = qualifyingDrafts.slice(
+      Math.max(0, qualifyingPosition - 3),
+      qualifyingPosition + 4,
+    )
+    const openingCounts = occurrenceCounts(
+      localDrafts.map((sentence) => sentence.openingKey),
+    )
+    const transitionCounts = occurrenceCounts(
+      localDrafts.map((sentence) => sentence.transition?.key),
+    )
+    const variation = lengthVariation(
+      localDrafts.map((sentence) => sentence.wordCount),
+    )
+    const averageLength =
+      localDrafts.reduce((sum, sentence) => sum + sentence.wordCount, 0) /
+      Math.max(1, localDrafts.length)
+    const uniformLengthImpact =
+      localDrafts.length >= 4 && averageLength >= 6 && variation <= 0.22
+        ? variation <= 0.1
+          ? 14
+          : variation <= 0.17
+            ? 11
+            : 8
+        : 0
+
+    return scoreSentence(
       draft,
       openingCounts,
       transitionCounts,
       uniformLengthImpact,
-    ),
+    )
+  })
+
+  const sentences = applyStatisticalScores(patternSentences)
+  const coverage = makeCoverage(text, sentences)
+  const passages =
+    coverage.status === 'exact' &&
+    coverage.rawPercent >= COVERAGE_REVIEW_THRESHOLD
+      ? makeFlaggedPassages(text, sentences)
+      : []
+  const topSignals = aggregateSignals(
+    sentences.filter((sentence) => sentence.qualifies),
+  ).slice(0, 5)
+  const score = coverage.rawPercent
+  const classification = classifyCoverage(score)
+  const patternIntensity = weightedPatternScore(sentences)
+  const confidence = makeConfidence(
+    coverage.qualifyingWordCount,
+    coverage.qualifyingSentenceCount,
   )
-  const passages = makeFlaggedPassages(text, sentences)
-  const topSignals = aggregateSignals(sentences).slice(0, 5)
-  const score = weightedScore(sentences)
-  const classification = classify(score)
-  const totalWords = wordsIn(text).length
-  const confidence = makeConfidence(totalWords, sentences.length)
 
   return {
     score,
+    coverage,
+    patternIntensity,
     classification,
     confidence,
-    summary: makeSummary(score, classification, confidence),
+    summary: makeSummary(coverage, confidence),
     sentences,
     flaggedPassages: passages,
     topSignals,
-    stats: makeStats(text, sentences, passages),
+    stats: makeStats(text, sentences, passages, coverage),
     coaching: makeCoaching(topSignals),
     methodology: {
       ...METHODOLOGY,
+      profileId: `${CALIBRATION_PROFILE.id}@${CALIBRATION_PROFILE.version}`,
       thresholds: { ...METHODOLOGY.thresholds },
       heuristics: [...METHODOLOGY.heuristics],
     },
@@ -891,10 +1419,13 @@ export type {
   AnalysisStats,
   Classification,
   ConfidenceLevel,
+  CoverageResult,
+  ExclusionReason,
   FlaggedPassage,
   RevisionCoaching,
   SentenceAnalysis,
   SignalId,
+  ScoreStatus,
   TopSignal,
   WritingSignal,
 } from './types'

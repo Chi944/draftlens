@@ -45,7 +45,7 @@ import type {
 
 type DocumentFilter = 'all' | 'flagged'
 
-const MIN_RECOMMENDED_WORDS = 80
+const MIN_RECOMMENDED_WORDS = 300
 
 function countWords(value: string) {
   return value.trim() ? value.trim().split(/\s+/u).length : 0
@@ -56,10 +56,16 @@ function scrollToTop() {
   document.body.scrollTop = 0
 }
 
-function classificationLabel(classification: Classification) {
-  if (classification === 'high') return 'Elevated pattern match'
-  if (classification === 'mixed') return 'Some pattern overlap'
-  return 'Few pattern matches'
+function classificationLabel(
+  classification: Classification,
+  status: AnalysisResult['coverage']['status'],
+) {
+  if (status === 'insufficient-prose') return 'Not enough qualifying prose'
+  if (status === 'out-of-range') return 'Outside the supported range'
+  if (status === 'below-reporting-threshold') return 'Below reporting threshold'
+  if (classification === 'high') return 'High estimated coverage'
+  if (classification === 'mixed') return 'Reviewable estimated coverage'
+  return 'No detected coverage'
 }
 
 function confidenceTone(level: AnalysisResult['confidence']['level']) {
@@ -68,14 +74,28 @@ function confidenceTone(level: AnalysisResult['confidence']['level']) {
   return 'muted'
 }
 
-function ScoreRing({ score, classification }: Pick<AnalysisResult, 'score' | 'classification'>) {
-  const activeTicks = Math.round(score / 5)
+function ScoreRing({
+  score,
+  classification,
+  coverage,
+}: Pick<AnalysisResult, 'score' | 'classification' | 'coverage'>) {
+  const activeTicks =
+    coverage.status === 'exact' ? Math.round(score / 5) : 0
+  const showPercent =
+    coverage.status === 'exact' ||
+    coverage.status === 'below-reporting-threshold'
+  const ringValue =
+    coverage.status === 'exact'
+      ? String(score)
+      : coverage.status === 'below-reporting-threshold'
+        ? '*'
+        : '—'
 
   return (
     <div
       className={`score-ring score-ring--${classification}`}
       role="img"
-      aria-label={`Writing-pattern score: ${score} percent`}
+      aria-label={`Estimated AI-pattern coverage: ${coverage.displayLabel}`}
     >
       {Array.from({ length: 20 }, (_, index) => (
         <span
@@ -86,8 +106,8 @@ function ScoreRing({ score, classification }: Pick<AnalysisResult, 'score' | 'cl
         />
       ))}
       <div className="score-ring__center">
-        <strong>{score}</strong>
-        <span>%</span>
+        <strong>{ringValue}</strong>
+        <span>{showPercent ? '%' : 'status'}</span>
       </div>
     </div>
   )
@@ -122,7 +142,7 @@ function HighlightedDocument({
       if (passage.end > start) {
         fragments.push(
           <button
-            aria-label={`Open coaching for flagged passage ${index + 1}, score ${passage.score} out of 100`}
+            aria-label={`Open coaching for detected passage ${index + 1}`}
             aria-pressed={selectedId === passage.id}
             className={`document-highlight document-highlight--${passage.classification}${
               selectedId === passage.id ? ' is-selected' : ''
@@ -134,7 +154,7 @@ function HighlightedDocument({
             {text.slice(start, passage.end)}
             <span className="document-highlight__label" aria-hidden="true">
               <Flag size={11} strokeWidth={2.5} />
-              {passage.classification === 'high' ? 'Elevated' : 'Review'} · {passage.score}
+              {passage.classification === 'high' ? 'Elevated' : 'Detected'}
             </span>
           </button>,
         )
@@ -310,7 +330,7 @@ function App() {
         {isImporting
           ? 'Reading the selected document.'
           : analysis
-            ? `Analysis complete. Writing-pattern score ${analysis.score} out of 100.${
+            ? `Analysis complete. Estimated AI-pattern coverage ${analysis.coverage.displayLabel}.${
                 selectedPassage
                   ? ` Passage ${selectedPassageIndex} selected for coaching.`
                   : ''
@@ -353,9 +373,8 @@ function App() {
               <em>Keep your voice.</em>
             </h1>
             <p>
-              Review a report for formulaic writing signals, inspect every flagged passage,
-              and get practical coaching to make your reasoning more specific and genuinely
-              yours.
+              Estimate how much qualifying prose matches calibrated AI-writing patterns,
+              inspect detected passages, and review the observable style evidence in context.
             </p>
           </section>
 
@@ -461,9 +480,9 @@ function App() {
               <div className="estimate-note">
                 <Info size={16} aria-hidden="true" />
                 <span>
-                  This is a writing-pattern estimate, not proof of AI authorship.
+                  This is an independent coverage estimate, not proof of AI authorship.
                   {wordCount > 0 && wordCount < MIN_RECOMMENDED_WORDS
-                    ? ` Results are more useful above ${MIN_RECOMMENDED_WORDS} words.`
+                    ? ` At least ${MIN_RECOMMENDED_WORDS} qualifying prose words are required for a reportable result.`
                     : ''}
                 </span>
               </div>
@@ -514,8 +533,9 @@ function App() {
               <span className="section-kicker">Analysis report</span>
               <h1 ref={resultsHeadingRef} tabIndex={-1}>{sourceName}</h1>
               <p>
-                Reviewed {analysis.stats.wordCount.toLocaleString()} words across{' '}
-                {analysis.stats.paragraphCount} paragraphs.
+                Reviewed {analysis.stats.qualifyingWordCount.toLocaleString()} qualifying
+                prose words; excluded {analysis.stats.excludedWordCount.toLocaleString()} of{' '}
+                {analysis.stats.wordCount.toLocaleString()} total words.
               </p>
             </div>
             <div className="results-actions">
@@ -536,27 +556,34 @@ function App() {
             </h2>
             <article className="score-card">
               <div className="score-card__heading">
-                <span className="section-kicker">Writing-pattern score</span>
+                <span className="section-kicker">Estimated AI-pattern coverage</span>
                 <span
                   className="icon-info"
-                  title="A heuristic score based on visible writing patterns; it is not a probability of AI authorship."
+                  title="The share of qualifying prose words inside passages that crossed DraftLens' calibrated threshold; this is not an authorship probability."
                   role="note"
-                  aria-label="About the writing-pattern score"
+                  aria-label="About estimated AI-pattern coverage"
                 >
                   <Info size={16} />
                 </span>
               </div>
               <div className="score-card__body">
-                <ScoreRing classification={analysis.classification} score={analysis.score} />
+                <ScoreRing
+                  classification={analysis.classification}
+                  coverage={analysis.coverage}
+                  score={analysis.score}
+                />
                 <div className="score-copy">
                   <span className={`risk-label risk-label--${analysis.classification}`}>
-                    {classificationLabel(analysis.classification)}
+                    {classificationLabel(
+                      analysis.classification,
+                      analysis.coverage.status,
+                    )}
                   </span>
                   <h3>{analysis.summary}</h3>
                   <p>
-                    This score estimates formulaic writing patterns. It cannot determine
-                    authorship and should never be used as proof or as the sole basis for a
-                    decision.
+                    The denominator includes long-form prose only. Headings, list fragments,
+                    unsupported-language text, and the bibliography are excluded. This
+                    estimate cannot determine authorship or serve as proof.
                   </p>
                 </div>
               </div>
@@ -592,19 +619,19 @@ function App() {
           <section className="stat-grid" aria-label="Document statistics">
             <article>
               <span className="stat-icon"><FileText size={18} aria-hidden="true" /></span>
-              <div><strong>{analysis.stats.sentenceCount}</strong><span>Sentences reviewed</span></div>
+              <div><strong>{analysis.stats.qualifyingWordCount.toLocaleString()}</strong><span>Qualifying prose words</span></div>
             </article>
             <article>
               <span className="stat-icon stat-icon--coral"><Flag size={18} aria-hidden="true" /></span>
-              <div><strong>{analysis.stats.flaggedPassageCount}</strong><span>Passages to review</span></div>
+              <div><strong>{analysis.stats.detectedWordCount.toLocaleString()}</strong><span>Words in detected passages</span></div>
             </article>
             <article>
               <span className="stat-icon stat-icon--amber"><BarChart3 size={18} aria-hidden="true" /></span>
-              <div><strong>{analysis.stats.averageSentenceLength}</strong><span>Average words / sentence</span></div>
+              <div><strong>{analysis.patternIntensity}</strong><span>Pattern intensity / 100</span></div>
             </article>
             <article>
               <span className="stat-icon stat-icon--teal"><Fingerprint size={18} aria-hidden="true" /></span>
-              <div><strong>{Math.round(analysis.stats.uniqueWordRatio)}%</strong><span>Unique-word ratio</span></div>
+              <div><strong>{analysis.stats.excludedWordCount.toLocaleString()}</strong><span>Excluded non-prose words</span></div>
             </article>
           </section>
 
@@ -709,7 +736,7 @@ function App() {
                         </span>
                         <q>{passage.text}</q>
                         <span className="flagged-excerpt__score">
-                          {passage.score} / 100
+                          Detected passage
                           <ChevronRight size={15} aria-hidden="true" />
                         </span>
                       </button>
@@ -718,8 +745,20 @@ function App() {
                 ) : (
                   <div className="document-empty">
                     <Check size={22} aria-hidden="true" />
-                    <h3>No flagged passages</h3>
-                    <p>This draft did not cross the passage-review thresholds.</p>
+                    <h3>
+                      {analysis.coverage.status === 'below-reporting-threshold'
+                        ? 'Highlights withheld below 20%'
+                        : analysis.coverage.status === 'insufficient-prose'
+                          ? 'More qualifying prose is needed'
+                          : 'No detected passages'}
+                    </h3>
+                    <p>
+                      {analysis.coverage.status === 'below-reporting-threshold'
+                        ? 'Low-coverage results are suppressed because isolated highlights carry a higher false-positive risk.'
+                        : analysis.coverage.status === 'insufficient-prose'
+                          ? 'Add at least 300 words of paragraph-based prose for a reportable estimate.'
+                          : 'This draft did not cross the calibrated passage threshold.'}
+                    </p>
                   </div>
                 )}
               </article>
@@ -740,9 +779,9 @@ function App() {
                     <blockquote>{selectedPassage.text}</blockquote>
                     <div className="passage-score-row">
                       <span className={`risk-label risk-label--${selectedPassage.classification}`}>
-                        {selectedPassage.classification === 'high' ? 'Elevated' : 'Review'}
+                        {selectedPassage.classification === 'high' ? 'Elevated' : 'Detected'}
                       </span>
-                      <strong>{selectedPassage.score} / 100</strong>
+                      <strong>Local passage evidence</strong>
                     </div>
 
                     <div className="reason-list">
@@ -800,6 +839,9 @@ function App() {
                 <h3>{analysis.methodology.name}</h3>
                 <p>{analysis.methodology.description}</p>
                 <p>{analysis.methodology.scoreMeaning}</p>
+                {analysis.methodology.profileId && (
+                  <p>Calibration profile: {analysis.methodology.profileId}</p>
+                )}
               </div>
               <div>
                 <h3>Important limitations</h3>
