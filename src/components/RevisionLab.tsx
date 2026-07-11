@@ -1,27 +1,27 @@
 import {
-  ArrowRight,
-  BarChart3,
   Check,
   FilePenLine,
+  ShieldAlert,
   RotateCcw,
   ShieldCheck,
   Sparkles,
 } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   compareRevisionAudits,
   type RevisionPreviewAnalysis,
 } from '../lib/revision-preview'
-import type {
-  RevisionMode,
-  RevisionPlan,
+import {
+  composeRevisionDraft,
+  type RevisionMode,
+  type RevisionPlan,
+  validateProtectedContent,
 } from '../lib/revision'
 
 interface RevisionLabProps {
   plan: RevisionPlan
   value: string
-  baselineText: string | null
   currentAnalysis: RevisionPreviewAnalysis
   previewAnalysis: RevisionPreviewAnalysis | null
   mode: RevisionMode
@@ -29,10 +29,6 @@ interface RevisionLabProps {
   onModeChange: (mode: RevisionMode) => void
   onPreview: () => void
   onApply: () => void
-}
-
-function countWords(value: string): number {
-  return value.trim() ? value.trim().split(/\s+/u).length : 0
 }
 
 function passageLabel(passageId: string | null): string {
@@ -47,10 +43,35 @@ function coverageLabel(analysis: RevisionPreviewAnalysis): string {
   return analysis.coverage.displayLabel
 }
 
+function auditMetricsMatch(
+  current: RevisionPreviewAnalysis,
+  preview: RevisionPreviewAnalysis,
+): boolean {
+  return (
+    coverageLabel(current) === coverageLabel(preview) &&
+    current.patternIntensity === preview.patternIntensity &&
+    current.flaggedPassages.length === preview.flaggedPassages.length
+  )
+}
+
+function changedTokenCount(before: string, after: string): number {
+  const tokens = (value: string) =>
+    value.toLowerCase().match(/[\p{L}\p{M}\p{N}]+/gu) ?? []
+  const counts = new Map<string, number>()
+
+  for (const token of tokens(before)) {
+    counts.set(token, (counts.get(token) ?? 0) + 1)
+  }
+  for (const token of tokens(after)) {
+    counts.set(token, (counts.get(token) ?? 0) - 1)
+  }
+
+  return [...counts.values()].reduce((total, count) => total + Math.abs(count), 0)
+}
+
 export function RevisionLab({
   plan,
   value,
-  baselineText,
   currentAnalysis,
   previewAnalysis,
   mode,
@@ -60,16 +81,66 @@ export function RevisionLab({
   onApply,
 }: RevisionLabProps) {
   const headingRef = useRef<HTMLHeadingElement>(null)
+  const [acceptedEditIds, setAcceptedEditIds] = useState<Set<string>>(
+    () => new Set(plan.edits.map((edit) => edit.id)),
+  )
+  const [protectedChangesAcknowledged, setProtectedChangesAcknowledged] =
+    useState(false)
   const changed = value !== plan.sourceText
-  const canLoadBaseline =
-    baselineText !== null && baselineText !== plan.sourceText
   const comparison = previewAnalysis
     ? compareRevisionAudits(currentAnalysis, previewAnalysis)
     : null
+  const automaticDraftIsActive = value === plan.previewText
+  const automaticChangedTokenCount = plan.edits.reduce(
+    (total, edit) => total + changedTokenCount(edit.before, edit.after),
+    0,
+  )
+  const hasOnlyMinorMechanicalEdits =
+    plan.edits.length <= 3 && automaticChangedTokenCount <= 12
+  const noSubstantiveAutomaticRevision = Boolean(
+    previewAnalysis &&
+      plan.edits.length > 0 &&
+      automaticDraftIsActive &&
+      hasOnlyMinorMechanicalEdits &&
+      auditMetricsMatch(currentAnalysis, previewAnalysis),
+  )
+  const primaryLabel = !changed
+    ? 'No changes to preview'
+    : previewAnalysis
+      ? 'Apply changes'
+      : 'Preview changes'
+  const protectedIssues = useMemo(
+    () => validateProtectedContent(plan.sourceText, value),
+    [plan.sourceText, value],
+  )
+  const canApplyProtectedChanges =
+    protectedIssues.length === 0 || protectedChangesAcknowledged
+
+  const rebuildFromSelection = (nextIds: Set<string>) => {
+    setAcceptedEditIds(nextIds)
+    setProtectedChangesAcknowledged(false)
+    onChange(composeRevisionDraft(plan, nextIds))
+  }
+
+  const toggleEdit = (editId: string) => {
+    const nextIds = new Set(acceptedEditIds)
+    if (nextIds.has(editId)) nextIds.delete(editId)
+    else nextIds.add(editId)
+    rebuildFromSelection(nextIds)
+  }
 
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: true })
   }, [plan.sourceText])
+
+  useEffect(() => {
+    setAcceptedEditIds(new Set(plan.edits.map((edit) => edit.id)))
+    setProtectedChangesAcknowledged(false)
+  }, [plan.edits, plan.sourceText])
+
+  useEffect(() => {
+    setProtectedChangesAcknowledged(false)
+  }, [protectedIssues])
 
   return (
     <div className="revision-lab">
@@ -77,192 +148,108 @@ export function RevisionLab({
         <span className="revision-lab__icon">
           <Sparkles size={18} aria-hidden="true" />
         </span>
-        <div>
-          <span className="section-kicker">Local editing workspace</span>
-          <h3 ref={headingRef} tabIndex={-1}>Revision Lab</h3>
-          <p>
-            Build a reviewable clarity draft, edit it in your own voice, preview
-            the local audit, and apply only the exact version you approved.
-          </p>
-        </div>
-      </div>
-
-      <div className="revision-safety" id="revision-safety-note">
-        <ShieldCheck size={17} aria-hidden="true" />
-        <p>{plan.warnings[0]}</p>
+        <h3 ref={headingRef} tabIndex={-1}>Revision Lab</h3>
       </div>
 
       <fieldset className="revision-mode">
-        <legend>Revision depth</legend>
+        <legend>Mechanical cleanup</legend>
         <div className="revision-mode__options">
           <label className={mode === 'conservative' ? 'is-selected' : ''}>
             <input
+              aria-describedby="revision-mode-description"
               checked={mode === 'conservative'}
               name="revision-depth"
               onChange={() => onModeChange('conservative')}
               type="radio"
               value="conservative"
             />
-            <span>
-              <strong>Conservative cleanup</strong>
-              <small>Only compresses high-confidence boilerplate in highlighted passages.</small>
-            </span>
+            <span>Conservative</span>
           </label>
           <label className={mode === 'comprehensive' ? 'is-selected' : ''}>
             <input
+              aria-describedby="revision-mode-description"
               checked={mode === 'comprehensive'}
               name="revision-depth"
               onChange={() => onModeChange('comprehensive')}
               type="radio"
               value="comprehensive"
             />
-            <span>
-              <strong>Comprehensive clarity</strong>
-              <small>Also scans all qualifying prose for safe redundancy and wordiness.</small>
-            </span>
+            <span>Document-wide</span>
           </label>
         </div>
-        <p>Changing depth rebuilds the uncommitted starter draft.</p>
+        <p id="revision-mode-description">
+          {mode === 'conservative'
+            ? 'Mechanical cleanup in highlighted passages only.'
+            : 'Document-wide mechanical cleanup of detected boilerplate and wordiness, not a contextual rewrite.'}
+        </p>
       </fieldset>
 
-      <dl className="revision-stats" aria-label="Revision draft statistics">
-        <div>
-          <dt>Reportable passages</dt>
-          <dd>{plan.passageCount}</dd>
-        </div>
-        <div>
-          <dt>Suggested edits</dt>
-          <dd>{plan.edits.length}</dd>
-        </div>
-        <div>
-          <dt>Current words</dt>
-          <dd>{countWords(plan.sourceText).toLocaleString()}</dd>
-        </div>
-        <div>
-          <dt>Draft words</dt>
-          <dd>{countWords(value).toLocaleString()}</dd>
-        </div>
-      </dl>
+      <p className="revision-safety" id="revision-safety-note">
+        <ShieldCheck size={16} aria-hidden="true" />
+        <span>Review every change; keep facts and citations accurate.</span>
+      </p>
 
       {plan.edits.length > 0 ? (
-        <details className="revision-details" open={plan.edits.length <= 8}>
+        <details className="revision-details">
           <summary>
             <Check size={15} aria-hidden="true" />
-            Wording changes drafted from the audit
-            <span>{plan.edits.length}</span>
+            Tracked edits
+            <span>{acceptedEditIds.size}/{plan.edits.length}</span>
           </summary>
           <div className="revision-change-list">
+            <div className="revision-change-list__actions">
+              <button
+                className="text-button"
+                onClick={() =>
+                  rebuildFromSelection(new Set(plan.edits.map((edit) => edit.id)))
+                }
+                type="button"
+              >
+                Accept all
+              </button>
+              <button
+                className="text-button"
+                onClick={() => rebuildFromSelection(new Set())}
+                type="button"
+              >
+                Reject all
+              </button>
+            </div>
             {plan.edits.map((edit) => (
-              <article key={edit.id}>
+              <article aria-label={`Tracked edit for ${passageLabel(edit.passageId)}`} key={edit.id}>
                 <div>
-                  <strong>{passageLabel(edit.passageId)}</strong>
+                  <label>
+                    <input
+                      checked={acceptedEditIds.has(edit.id)}
+                      onChange={() => toggleEdit(edit.id)}
+                      type="checkbox"
+                    />
+                    <strong>{passageLabel(edit.passageId)}</strong>
+                  </label>
                   <span>{edit.rationale}</span>
                 </div>
-                <p><b>Before</b>{edit.before}</p>
-                <p><b>Draft</b>{edit.after}</p>
+                <p><b>Before</b><del>{edit.before}</del></p>
+                <p><b>Draft</b><ins>{edit.after}</ins></p>
               </article>
             ))}
           </div>
         </details>
       ) : (
-        <div className="revision-no-safe-edits">
-          <FilePenLine size={18} aria-hidden="true" />
-          <div>
-            <strong>No wording was changed automatically.</strong>
-            <p>
-              The remaining findings need the writer&apos;s evidence or judgment.
-              Use the prompts and passage coaching while editing below.
-            </p>
-          </div>
-        </div>
+        <p className="revision-no-safe-edits">
+          <FilePenLine size={16} aria-hidden="true" />
+          <span><strong>No automatic cleanup was available.</strong> Edit directly or use the writing prompts.</span>
+        </p>
       )}
-
-      <label className="revision-editor-label" htmlFor="revision-document">
-        Editable revised document
-        <span>Changes remain a draft until the matching preview is applied.</span>
-      </label>
-      <textarea
-        aria-label="Editable revised document"
-        aria-describedby="revision-safety-note revision-editor-help"
-        className="revision-document-editor"
-        id="revision-document"
-        onChange={(event) => onChange(event.target.value)}
-        spellCheck="true"
-        value={value}
-      />
-      <p className="revision-editor-help" id="revision-editor-help">
-        Keep claims, quotations, citations, names, numbers, and qualifiers accurate.
-        DraftLens cannot verify new facts added here.
-      </p>
-
-      <section
-        aria-labelledby="revision-preview-title"
-        aria-live="polite"
-        className="revision-audit-preview"
-      >
-        <div className="revision-audit-preview__heading">
-          <span className="revision-preview-icon">
-            <BarChart3 size={17} aria-hidden="true" />
-          </span>
-          <div>
-            <span className="section-kicker">Before you apply</span>
-            <h4 id="revision-preview-title">Draft audit preview</h4>
-          </div>
-          <span className={`revision-preview-state${previewAnalysis ? ' is-current' : ''}`}>
-            {previewAnalysis ? 'Current preview' : 'Preview needed'}
-          </span>
-        </div>
-
-        {previewAnalysis && comparison ? (
-          <>
-            <div className="revision-comparison">
-              <article>
-                <span>Current audit</span>
-                <strong>{coverageLabel(currentAnalysis)}</strong>
-                <small>AI-pattern coverage</small>
-                <dl>
-                  <div><dt>Pattern intensity</dt><dd>{currentAnalysis.patternIntensity}</dd></div>
-                  <div><dt>Reportable passages</dt><dd>{currentAnalysis.flaggedPassages.length}</dd></div>
-                  <div><dt>Qualifying words</dt><dd>{currentAnalysis.stats.qualifyingWordCount.toLocaleString()}</dd></div>
-                </dl>
-              </article>
-              <ArrowRight className="revision-comparison__arrow" size={19} aria-hidden="true" />
-              <article>
-                <span>Draft audit</span>
-                <strong>{coverageLabel(previewAnalysis)}</strong>
-                <small>AI-pattern coverage</small>
-                <dl>
-                  <div><dt>Pattern intensity</dt><dd>{previewAnalysis.patternIntensity}</dd></div>
-                  <div><dt>Reportable passages</dt><dd>{previewAnalysis.flaggedPassages.length}</dd></div>
-                  <div><dt>Qualifying words</dt><dd>{previewAnalysis.stats.qualifyingWordCount.toLocaleString()}</dd></div>
-                </dl>
-              </article>
-            </div>
-            <div className={`revision-preview-outcome revision-preview-outcome--${comparison.direction}`}>
-              <strong>{comparison.headline}</strong>
-              <p>{comparison.detail}</p>
-            </div>
-          </>
-        ) : (
-          <div className="revision-preview-empty">
-            <strong>The draft changed after its last preview.</strong>
-            <p>
-              Preview this exact text to see whether coverage, reportable passages,
-              or pattern intensity changed. The document will not be modified.
-            </p>
-          </div>
-        )}
-      </section>
 
       <details className="revision-details revision-guidance">
         <summary>
           <FilePenLine size={15} aria-hidden="true" />
-          Evidence-dependent revision prompts
+          Writing prompts
           <span>{plan.guidance.length}</span>
         </summary>
         <div className="revision-guidance-list">
           {plan.guidance.map((item) => (
-            <article key={item.signalId}>
+            <article aria-label={`Writing prompt: ${item.title}`} key={item.signalId}>
               <strong>{item.title}</strong>
               <p>{item.instruction}</p>
             </article>
@@ -270,49 +257,120 @@ export function RevisionLab({
         </div>
       </details>
 
+      <label className="revision-editor-label" htmlFor="revision-document">
+        Revised document
+      </label>
+      <textarea
+        aria-describedby={`revision-safety-note${protectedIssues.length > 0 ? ' revision-protected-warning' : ''}`}
+        className="revision-document-editor"
+        id="revision-document"
+        onChange={(event) => onChange(event.target.value)}
+        spellCheck="true"
+        value={value}
+      />
+
+      {protectedIssues.length > 0 && (
+        <div aria-live="polite" className="revision-protected-warning" id="revision-protected-warning" role="status">
+          <ShieldAlert size={17} aria-hidden="true" />
+          <div>
+            <strong>Review protected-content changes</strong>
+            <p>
+              {protectedIssues.length} change{protectedIssues.length === 1 ? '' : 's'}
+              {' '}affect numbers, citations, quotations, names, or qualifiers.
+            </p>
+            <ul>
+              {protectedIssues.slice(0, 5).map((issue, index) => (
+                <li key={`${issue.kind}-${issue.change}-${issue.value}-${index}`}>
+                  {issue.change === 'added' ? 'Added' : 'Removed'} <q>{issue.value}</q>
+                </li>
+              ))}
+            </ul>
+            <label>
+              <input
+                checked={protectedChangesAcknowledged}
+                onChange={(event) =>
+                  setProtectedChangesAcknowledged(event.target.checked)
+                }
+                type="checkbox"
+              />
+              I reviewed these changes against the source.
+            </label>
+          </div>
+        </div>
+      )}
+
+      <section
+        aria-labelledby="revision-preview-title"
+        aria-live="polite"
+        className="revision-audit-preview"
+      >
+        <h4 id="revision-preview-title">Audit preview</h4>
+
+        {previewAnalysis && comparison ? (
+          <>
+            <table className="revision-comparison">
+              <caption className="visually-hidden">Current and draft audit comparison</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Metric</th>
+                  <th scope="col">Current</th>
+                  <th scope="col">Draft</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Flagged prose coverage</th>
+                  <td>{coverageLabel(currentAnalysis)}</td>
+                  <td>{coverageLabel(previewAnalysis)}</td>
+                </tr>
+                <tr>
+                  <th scope="row">Pattern intensity</th>
+                  <td>{currentAnalysis.patternIntensity}</td>
+                  <td>{previewAnalysis.patternIntensity}</td>
+                </tr>
+                <tr>
+                  <th scope="row">Flagged passages</th>
+                  <td>{currentAnalysis.flaggedPassages.length}</td>
+                  <td>{previewAnalysis.flaggedPassages.length}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p className={`revision-preview-outcome revision-preview-outcome--${comparison.direction}`}>
+              {noSubstantiveAutomaticRevision ? (
+                <><strong>Only minor mechanical cleanup was available.</strong> The audit metrics are unchanged.</>
+              ) : (
+                <strong>{comparison.headline}</strong>
+              )}
+            </p>
+          </>
+        ) : (
+          <p className="revision-preview-empty">
+            {changed
+              ? 'Preview this draft before applying it.'
+              : 'Edit the document to preview changes.'}
+          </p>
+        )}
+      </section>
+
       <div className="revision-lab__actions">
         <button
           className="quiet-button"
-          onClick={() => onChange(plan.previewText)}
-          type="button"
-        >
-          <Sparkles size={15} aria-hidden="true" />
-          Rebuild {mode === 'comprehensive' ? 'comprehensive' : 'conservative'} draft
-        </button>
-        <button
-          className="quiet-button"
-          onClick={() => onChange(plan.sourceText)}
+          disabled={!changed}
+          onClick={() => rebuildFromSelection(new Set())}
           type="button"
         >
           <RotateCcw size={15} aria-hidden="true" />
-          Use current wording
-        </button>
-        {canLoadBaseline && (
-          <button
-            className="quiet-button"
-            onClick={() => onChange(baselineText)}
-            type="button"
-          >
-            <RotateCcw size={15} aria-hidden="true" />
-            Load analysed original
-          </button>
-        )}
-        <button
-          className="quiet-button"
-          onClick={onPreview}
-          type="button"
-        >
-          <BarChart3 size={16} aria-hidden="true" />
-          {previewAnalysis ? 'Refresh draft audit' : 'Preview draft audit'}
+          Reset draft
         </button>
         <button
+          aria-describedby={protectedIssues.length > 0 ? 'revision-protected-warning' : undefined}
           className="primary-button"
-          disabled={!changed || previewAnalysis === null}
-          onClick={onApply}
+          disabled={!changed || !canApplyProtectedChanges}
+          onClick={previewAnalysis ? onApply : onPreview}
           type="button"
         >
           <FilePenLine size={16} aria-hidden="true" />
-          Apply previewed draft
+          {primaryLabel}
         </button>
       </div>
     </div>

@@ -32,6 +32,13 @@ const EPOCHS = 450
 const LEARNING_RATE = 0.035
 const HUMAN_DOCUMENT_FALSE_POSITIVE_TARGET = 0.01
 const REPORTING_FLOOR = 0.2
+const DOMAIN_SUPPORT_QUANTILE = 0.995
+const LONG_WORD_MINIMUM_CHARACTERS = 10
+const LEXICAL_DOMAIN_FEATURES = [
+  'meanWordLength',
+  'stopwordRatio',
+  'nominalizationRatio',
+]
 
 function stableBucket(id) {
   let hash = 2166136261
@@ -67,6 +74,12 @@ function rate(numerator, denominator) {
 
 function round(value) {
   return Number(value.toFixed(6))
+}
+
+function quantile(values, probability) {
+  if (values.length === 0) return 0
+  const ordered = [...values].sort((left, right) => left - right)
+  return ordered[Math.floor((ordered.length - 1) * probability)]
 }
 
 async function loadFeatureModule() {
@@ -114,6 +127,10 @@ async function loadDocuments(featureModule) {
         split: splitForId(id),
         sentenceWordCounts: sentences.map((sentence) =>
           featureModule.countStatisticalWords(sentence),
+        ),
+        writingCharacteristics: featureModule.extractWritingCharacteristics(
+          text,
+          LONG_WORD_MINIMUM_CHARACTERS,
         ),
         windows: ranges.map(({ start, end }) => ({
           start,
@@ -243,6 +260,95 @@ function attachProbabilities(
   })
 }
 
+function documentDomainMetrics(
+  document,
+  featureNames,
+  means,
+  scales,
+  coefficients,
+) {
+  const meanContributions = featureNames.map(() => 0)
+  document.windows.forEach((window) => {
+    featureNames.forEach((name, index) => {
+      meanContributions[index] +=
+        (((window.features[name] - means[index]) / scales[index]) *
+          coefficients[index]) /
+        document.windows.length
+    })
+  })
+  const positiveContributionTotal = meanContributions.reduce(
+    (total, contribution) => total + Math.max(0, contribution),
+    0,
+  )
+  const lexicalContribution = LEXICAL_DOMAIN_FEATURES.reduce(
+    (total, name) =>
+      total +
+      Math.max(0, meanContributions[featureNames.indexOf(name)]),
+    0,
+  )
+
+  return {
+    longWordRatio: document.writingCharacteristics.longWordRatio,
+    lexicalContributionShare: rate(
+      lexicalContribution,
+      positiveContributionTotal,
+    ),
+  }
+}
+
+function buildDomainSupport(
+  documents,
+  featureNames,
+  means,
+  scales,
+  coefficients,
+) {
+  const metrics = new Map(
+    documents.map((document) => [
+      document,
+      documentDomainMetrics(
+        document,
+        featureNames,
+        means,
+        scales,
+        coefficients,
+      ),
+    ]),
+  )
+  const trainingMetrics = documents
+    .filter((document) => document.split === 'train')
+    .map((document) => metrics.get(document))
+  const longWordRatioUpperBound = quantile(
+    trainingMetrics.map((metric) => metric.longWordRatio),
+    DOMAIN_SUPPORT_QUANTILE,
+  )
+  const lexicalContributionShareUpperBound = quantile(
+    trainingMetrics.map((metric) => metric.lexicalContributionShare),
+    DOMAIN_SUPPORT_QUANTILE,
+  )
+  const isUnsupported = (metric) =>
+    metric.longWordRatio > longWordRatioUpperBound &&
+    metric.lexicalContributionShare > lexicalContributionShareUpperBound
+  const unsupportedRate = (split) => {
+    const selected = documents.filter((document) => document.split === split)
+    return rate(
+      selected.filter((document) => isUnsupported(metrics.get(document))).length,
+      selected.length,
+    )
+  }
+
+  return {
+    method: 'joint-upper-tail',
+    calibrationQuantile: DOMAIN_SUPPORT_QUANTILE,
+    longWordMinimumCharacters: LONG_WORD_MINIMUM_CHARACTERS,
+    longWordRatioUpperBound,
+    lexicalContributionShareUpperBound,
+    lexicalFeatureNames: LEXICAL_DOMAIN_FEATURES,
+    trainingUnsupportedDocumentRate: unsupportedRate('train'),
+    validationUnsupportedDocumentRate: unsupportedRate('validation'),
+  }
+}
+
 function documentRates(documents, split, threshold) {
   const selected = documents.filter((document) => document.split === split)
   const human = selected.filter((document) => document.label === 0)
@@ -363,6 +469,7 @@ function generatedProfileSource({
   coefficients,
   intercept,
   threshold,
+  domainSupport,
   documentCounts,
   validationMetrics,
   testDocumentMetrics,
@@ -376,7 +483,7 @@ function generatedProfileSource({
  */
 export const CALIBRATION_PROFILE = {
   id: 'ghostbuster-essay-logistic',
-  version: 'ghostbuster-essay-v2',
+  version: 'ghostbuster-essay-v3-domain-gated',
   model: 'standardized-logistic-regression',
   featureNames: ${JSON.stringify(featureNames, null, 2)
     .split('\n')
@@ -387,6 +494,16 @@ export const CALIBRATION_PROFILE = {
   coefficients: ${vectorSource(featureNames, coefficients)},
   intercept: ${round(intercept)},
   detectionThreshold: ${round(threshold)},
+  domainSupport: {
+    method: 'joint-upper-tail',
+    calibrationQuantile: ${domainSupport.calibrationQuantile},
+    longWordMinimumCharacters: ${domainSupport.longWordMinimumCharacters},
+    longWordRatioUpperBound: ${round(domainSupport.longWordRatioUpperBound)},
+    lexicalContributionShareUpperBound: ${round(domainSupport.lexicalContributionShareUpperBound)},
+    lexicalFeatureNames: ${JSON.stringify(domainSupport.lexicalFeatureNames)},
+    trainingUnsupportedDocumentRate: ${round(domainSupport.trainingUnsupportedDocumentRate)},
+    validationUnsupportedDocumentRate: ${round(domainSupport.validationUnsupportedDocumentRate)},
+  },
   source: {
     name: 'Ghostbuster essay corpus',
     url: 'https://github.com/vivek3141/ghostbuster-data',
@@ -433,6 +550,13 @@ async function main() {
     coefficients,
     intercept,
   )
+  const domainSupport = buildDomainSupport(
+    documents,
+    featureNames,
+    means,
+    scales,
+    coefficients,
+  )
 
   const validationMetrics = chooseThreshold(documents)
   const testDocumentMetrics = documentRates(
@@ -461,6 +585,7 @@ async function main() {
       coefficients,
       intercept,
       threshold: validationMetrics.threshold,
+      domainSupport,
       documentCounts,
       validationMetrics,
       testDocumentMetrics,
@@ -476,6 +601,20 @@ async function main() {
         documents: documentCounts,
         windows: rows.length,
         detectionThreshold: round(validationMetrics.threshold),
+        domainSupport: {
+          longWordRatioUpperBound: round(
+            domainSupport.longWordRatioUpperBound,
+          ),
+          lexicalContributionShareUpperBound: round(
+            domainSupport.lexicalContributionShareUpperBound,
+          ),
+          trainingUnsupportedDocumentRate: round(
+            domainSupport.trainingUnsupportedDocumentRate,
+          ),
+          validationUnsupportedDocumentRate: round(
+            domainSupport.validationUnsupportedDocumentRate,
+          ),
+        },
         validationHumanDocumentFalsePositiveRate: round(
           validationMetrics.humanFalsePositiveRate,
         ),

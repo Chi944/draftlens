@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import {
   applyAuditRevisionDraft,
+  composeRevisionDraft,
   planAuditRevisions,
+  validateProtectedContent,
   type RevisionAudit,
 } from './revision'
 import type {
@@ -99,6 +101,45 @@ function makeAudit(
 }
 
 describe('audit-guided revision planning', () => {
+  it('composes a tracked draft from individually accepted edits', () => {
+    const sentences = [
+      'It is clear that the trial ended.',
+      'In conclusion, it is evident that three teams withdrew.',
+    ]
+    const text = sentences.join(' ')
+    const plan = planAuditRevisions(
+      text,
+      makeAudit(text, sentences, ['stock-phrases']),
+    )
+
+    expect(plan.edits).toHaveLength(2)
+    expect(composeRevisionDraft(plan, [plan.edits[1].id])).toBe(
+      'It is clear that the trial ended. Evidently, three teams withdrew.',
+    )
+    expect(composeRevisionDraft(plan, [])).toBe(text)
+  })
+
+  it('reports removed and newly introduced protected content', () => {
+    const source =
+      'Priya Nair wrote “Batch C17 may include 48 records” (Nair, 2025).'
+    const revised =
+      'Priya Nair wrote “Batch C17 includes 49 records” (Nair, 2025).'
+    const issues = validateProtectedContent(source, revised)
+
+    expect(issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: '48', change: 'removed' }),
+        expect.objectContaining({ value: '49', change: 'added' }),
+        expect.objectContaining({ value: 'may', change: 'removed' }),
+        expect.objectContaining({ kind: 'quotation', change: 'removed' }),
+        expect.objectContaining({ kind: 'quotation', change: 'added' }),
+      ]),
+    )
+    expect(
+      validateProtectedContent(source, source),
+    ).toHaveLength(0)
+  })
+
   it('compresses only conservative sentence-opening stock frames', () => {
     const sentences = [
       'It is important to note that the trial ended on Tuesday.',

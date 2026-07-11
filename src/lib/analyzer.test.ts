@@ -19,6 +19,35 @@ const concreteText = [
 const longFormulaicText = Array(7).fill(formulaicText).join(' ')
 const longConcreteText = Array(5).fill(concreteText).join(' ')
 
+const formalAcademicFixtures = [
+  Array(4)
+    .fill(
+      [
+        'Spectrophotometric quantification demonstrated substantial intracellular phosphorylation after thermodynamic stabilization of the recombinant microorganism culture (Ramanathan et al., 2021).',
+        'Chromatographic characterization separated the polyunsaturated metabolites before immunohistochemical examination of mitochondrial membranes.',
+        'The experimental methodology incorporated triplicate measurements, temperature-controlled centrifugation, and preregistered exclusion criteria for contaminated observations.',
+        'Researchers documented concentration-dependent differentiation across the longitudinal intervention groups without substituting unverified interpretations for recorded measurements.',
+        'Heteroscedasticity diagnostics supported logarithmic transformation before multivariable regression, although confidence intervals remained comparatively wide.',
+        'Independent replication identified comparable electrophysiological associations in geographically separated populations (Mendelson and Ibarra, 2020).',
+        'These observations constrain generalization because institutional recruitment excluded participants with cardiometabolic contraindications.',
+      ].join(' '),
+    )
+    .join(' '),
+  Array(4)
+    .fill(
+      [
+        'Environmental sustainability disclosures documented organizational decarbonization commitments across multinational manufacturing corporations (Wijayanto et al., 2023).',
+        'The longitudinal investigation compared independently verified greenhouse-gas inventories with contemporaneous profitability measurements.',
+        'Corporate-governance characteristics included board independence, institutional ownership concentration, remuneration transparency, and stakeholder consultation frequency.',
+        'Multivariate specifications incorporated industry classification, capitalization, internationalization, and macroeconomic volatility as prespecified covariates.',
+        'Researchers interpreted statistically insignificant associations conservatively because inconsistent disclosure frameworks limited comparability between jurisdictions.',
+        'Sensitivity analyses reproduced the directional relationship after excluding financial institutions and winsorizing exceptionally capitalized observations.',
+        'Consequently, the literature supports conditional association rather than universal causation between sustainability governance and enterprise valuation.',
+      ].join(' '),
+    )
+    .join(' '),
+]
+
 describe('analyzeText', () => {
   it('is deterministic and keeps every numeric score within 0-100', () => {
     const inputs = ['', 'A short sentence.', longConcreteText, longFormulaicText]
@@ -70,6 +99,67 @@ describe('analyzeText', () => {
     expect(formulaic.topSignals.map((signal) => signal.id)).toContain(
       'stock-phrases',
     )
+  })
+
+  it('withholds saturated formal-academic extrapolations outside calibration support', () => {
+    formalAcademicFixtures.forEach((fixture) => {
+      const result = analyzeText(fixture)
+
+      expect(result.coverage.qualifyingWordCount).toBeGreaterThanOrEqual(300)
+      expect(result.coverage.rawPercent).toBeGreaterThanOrEqual(80)
+      expect(result.domainSupport.status).toBe('unsupported')
+      expect(result.coverage.status).toBe('unsupported-domain')
+      expect(result.coverage.displayedPercent).toBeNull()
+      expect(result.coverage.displayLabel).toBe('Outside calibrated domain')
+      expect(result.flaggedPassages).toHaveLength(0)
+      expect(result.summary).not.toMatch(/\b(?:8\d|9\d|100)%\b/u)
+      expect(result.writingCharacteristics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            source: 'writing-characteristic',
+            id: 'long-word-ratio',
+          }),
+        ]),
+      )
+      expect(result.modelFactors[0]).toEqual(
+        expect.objectContaining({
+          source: 'calibrated-model',
+          feature: 'meanWordLength',
+          direction: 'raises',
+        }),
+      )
+    })
+  })
+
+  it('attaches causal signed model factors to detected passages', () => {
+    const result = analyzeText(longFormulaicText)
+    const passage = result.flaggedPassages[0]
+
+    expect(result.domainSupport.status).toBe('supported')
+    expect(passage?.modelFactors?.length).toBeGreaterThan(1)
+    expect(
+      passage?.modelFactors?.some((factor) => factor.contribution > 0),
+    ).toBe(true)
+    expect(
+      passage?.modelFactors?.some((factor) => factor.contribution < 0),
+    ).toBe(true)
+    passage?.modelFactors?.forEach((factor) => {
+      expect(factor.source).toBe('calibrated-model')
+      expect(Number.isFinite(factor.value)).toBe(true)
+      expect(Number.isFinite(factor.standardizedValue)).toBe(true)
+      expect(Number.isFinite(factor.contribution)).toBe(true)
+    })
+  })
+
+  it('does not merge a detected passage across paragraph or PDF-page boundaries', () => {
+    const paragraph = Array(5).fill(formulaicText).join(' ')
+    const result = analyzeText(`${paragraph}\n\n${paragraph}`)
+
+    expect(result.coverage.status).toBe('exact')
+    expect(result.flaggedPassages.length).toBeGreaterThanOrEqual(2)
+    expect(
+      result.flaggedPassages.every((passage) => !passage.text.includes('\n\n')),
+    ).toBe(true)
   })
 
   it('returns exact, end-exclusive offsets into the original input', () => {
@@ -162,6 +252,95 @@ describe('analyzeText', () => {
     })
   })
 
+  it('uses excluded physical lines as hard barriers around qualifying prose', () => {
+    const firstBodySentence =
+      'Moreover, the implementation of a comprehensive framework facilitates the optimization of important processes.'
+    const input = [
+      'CHAPTER I',
+      'INTRODUCTION',
+      '1.1 Background',
+      longFormulaicText,
+    ].join('\n')
+    const result = analyzeText(input)
+    const firstQualifying = result.sentences.find((sentence) => sentence.qualifies)
+
+    expect(firstQualifying?.start).toBe(input.indexOf(firstBodySentence))
+    result.sentences.forEach((sentence) => {
+      expect(input.slice(sentence.start, sentence.end)).toBe(sentence.text)
+    })
+    expect(
+      result.sentences
+        .filter((sentence) => sentence.qualifies)
+        .some((sentence) => /CHAPTER|INTRODUCTION|1\.1 Background/u.test(sentence.text)),
+    ).toBe(false)
+  })
+
+  it('keeps contents, document headings, keywords, footers, and page numbers out of evidence', () => {
+    const baseText = `${longFormulaicText}\n${longFormulaicText}`
+    const decoratedText = [
+      'TABLE OF CONTENTS',
+      'COVER................................ i',
+      'CHAPTER I - INTRODUCTION............. 1',
+      'LIST OF TABLES',
+      'Table 2.1 Journal Review............. 20',
+      'CHAPTER I',
+      'INTRODUCTION',
+      '1.1 Background',
+      'Keywords: sustainability, governance, reporting',
+      longFormulaicText,
+      '1',
+      'Universitas Indonesia',
+      'CHAPTER II',
+      'DISCUSSION',
+      longFormulaicText,
+      'ii',
+      'Universitas Indonesia',
+    ].join('\n')
+    const base = analyzeText(baseText)
+    const decorated = analyzeText(decoratedText)
+    const artifactPattern =
+      /TABLE OF CONTENTS|\.{3,}|CHAPTER|INTRODUCTION|LIST OF TABLES|Keywords:|Universitas Indonesia/iu
+
+    expect(decorated.coverage.qualifyingWordCount).toBe(
+      base.coverage.qualifyingWordCount,
+    )
+    expect(decorated.score).toBe(base.score)
+    expect(
+      decorated.sentences
+        .filter((sentence) => sentence.qualifies)
+        .some((sentence) => artifactPattern.test(sentence.text)),
+    ).toBe(false)
+    expect(
+      decorated.flaggedPassages.some((passage) =>
+        artifactPattern.test(passage.text),
+      ),
+    ).toBe(false)
+  })
+
+  it('does not mistake a prose line beginning with references for a bibliography heading', () => {
+    const input = [
+      longFormulaicText,
+      'This section summarizes the ten selected journal articles used as the primary',
+      'references in this study.',
+      'The selected articles were analyzed against the stated research questions.',
+      longFormulaicText,
+    ].join('\n')
+    const result = analyzeText(input)
+    const discussion = result.sentences.find((sentence) =>
+      sentence.text.includes('references in this study'),
+    )
+
+    expect(discussion?.qualifies).toBe(true)
+    expect(discussion?.exclusionReason).toBeUndefined()
+    expect(
+      result.sentences
+        .filter((sentence) =>
+          sentence.text.includes('selected articles were analyzed'),
+        )
+        .every((sentence) => sentence.qualifies),
+    ).toBe(true)
+  })
+
   it('does not let an appended bibliography change the score denominator', () => {
     const references = Array(80)
       .fill(
@@ -235,7 +414,7 @@ describe('analyzeText', () => {
       'calibrated-writing-pattern-estimator',
     )
     expect(result.methodology.profileId).toBe(
-      'ghostbuster-essay-logistic@ghostbuster-essay-v2',
+      'ghostbuster-essay-logistic@ghostbuster-essay-v3-domain-gated',
     )
     expect(result.methodology.scoreMeaning).toMatch(/qualifying prose/i)
     expect(result.methodology.scoreMeaning).toMatch(/not the probability/i)

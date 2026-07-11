@@ -6,7 +6,7 @@ import type { StatisticalCalibrationProfile } from '../lib/statistical-features'
  */
 export const CALIBRATION_PROFILE = {
   id: 'ghostbuster-essay-logistic',
-  version: 'ghostbuster-essay-v2',
+  version: 'ghostbuster-essay-v3-domain-gated',
   model: 'standardized-logistic-regression',
   featureNames: [
     "meanSentenceWords",
@@ -106,6 +106,16 @@ export const CALIBRATION_PROFILE = {
   },
   intercept: 0.041724,
   detectionThreshold: 0.861392,
+  domainSupport: {
+    method: 'joint-upper-tail',
+    calibrationQuantile: 0.995,
+    longWordMinimumCharacters: 10,
+    longWordRatioUpperBound: 0.267717,
+    lexicalContributionShareUpperBound: 0.817116,
+    lexicalFeatureNames: ["meanWordLength","stopwordRatio","nominalizationRatio"],
+    trainingUnsupportedDocumentRate: 0.000416,
+    validationUnsupportedDocumentRate: 0,
+  },
   source: {
     name: 'Ghostbuster essay corpus',
     url: 'https://github.com/vivek3141/ghostbuster-data',

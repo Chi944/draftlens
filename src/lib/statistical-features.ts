@@ -32,6 +32,40 @@ export type StatisticalFeatureName =
 
 export type StatisticalFeatureVector = Record<StatisticalFeatureName, number>
 
+export const WRITING_CHARACTERISTIC_NAMES = [
+  'longWordRatio',
+  'citationSentenceRatio',
+] as const
+
+export type WritingCharacteristicName =
+  (typeof WRITING_CHARACTERISTIC_NAMES)[number]
+
+export type WritingCharacteristicVector = Record<
+  WritingCharacteristicName,
+  number
+>
+
+export interface StatisticalFeatureContribution {
+  feature: StatisticalFeatureName
+  value: number
+  standardizedValue: number
+  /** Signed contribution to the logistic model's log-odds. */
+  contribution: number
+}
+
+export interface StatisticalLikelihoodExplanation {
+  probability: number
+  logit: number
+  intercept: number
+  contributions: StatisticalFeatureContribution[]
+}
+
+export interface StatisticalDomainSupportAssessment {
+  status: 'supported' | 'unsupported'
+  lexicalContributionShare: number
+  reasons: string[]
+}
+
 export interface StatisticalCalibrationProfile {
   id: string
   version: string
@@ -42,6 +76,16 @@ export interface StatisticalCalibrationProfile {
   coefficients: StatisticalFeatureVector
   intercept: number
   detectionThreshold: number
+  domainSupport: {
+    method: 'joint-upper-tail'
+    calibrationQuantile: number
+    longWordMinimumCharacters: number
+    longWordRatioUpperBound: number
+    lexicalContributionShareUpperBound: number
+    lexicalFeatureNames: readonly StatisticalFeatureName[]
+    trainingUnsupportedDocumentRate: number
+    validationUnsupportedDocumentRate: number
+  }
   source: {
     name: string
     url: string
@@ -353,16 +397,100 @@ export function extractStatisticalFeatures(
   }
 }
 
+const AUTHOR_YEAR_CITATION =
+  /\((?:[^()]{0,100}\b(?:19|20)\d{2}[a-z]?[^()]*)\)|\[(?:\s*\d{1,3}\s*[,;\u2013-]?\s*)+\]/iu
+
+export function extractWritingCharacteristics(
+  text: string,
+  longWordMinimumCharacters =
+    CALIBRATION_PROFILE.domainSupport.longWordMinimumCharacters,
+): WritingCharacteristicVector {
+  const sentences = splitStatisticalSentences(text)
+  const alphabeticWords = matchWords(text).filter((word) => /^\p{L}/u.test(word))
+
+  return {
+    longWordRatio: ratio(
+      alphabeticWords.filter(
+        (word) => word.replace(/['\u2019]/gu, '').length >= longWordMinimumCharacters,
+      ).length,
+      alphabeticWords.length,
+    ),
+    citationSentenceRatio: ratio(
+      sentences.filter((sentence) => AUTHOR_YEAR_CITATION.test(sentence)).length,
+      sentences.length,
+    ),
+  }
+}
+
+export function explainStatisticalLikelihood(
+  features: StatisticalFeatureVector,
+  profile: StatisticalCalibrationProfile = CALIBRATION_PROFILE,
+): StatisticalLikelihoodExplanation {
+  const contributions = profile.featureNames.map((feature) => {
+    const standardizedValue =
+      (features[feature] - profile.means[feature]) / profile.scales[feature]
+    return {
+      feature,
+      value: features[feature],
+      standardizedValue,
+      contribution: standardizedValue * profile.coefficients[feature],
+    }
+  })
+  const logit = contributions.reduce(
+    (total, factor) => total + factor.contribution,
+    profile.intercept,
+  )
+
+  return {
+    probability:
+      1 / (1 + Math.exp(-Math.max(-30, Math.min(30, logit)))),
+    logit,
+    intercept: profile.intercept,
+    contributions,
+  }
+}
+
+export function assessStatisticalDomainSupport(
+  characteristics: WritingCharacteristicVector,
+  meanContributions: StatisticalFeatureVector,
+  profile: StatisticalCalibrationProfile = CALIBRATION_PROFILE,
+): StatisticalDomainSupportAssessment {
+  const positiveContributionTotal = profile.featureNames.reduce(
+    (total, feature) => total + Math.max(0, meanContributions[feature]),
+    0,
+  )
+  const lexicalContribution = profile.domainSupport.lexicalFeatureNames.reduce(
+    (total, feature) => total + Math.max(0, meanContributions[feature]),
+    0,
+  )
+  const lexicalContributionShare = ratio(
+    lexicalContribution,
+    positiveContributionTotal,
+  )
+  const longWordTail =
+    characteristics.longWordRatio >
+    profile.domainSupport.longWordRatioUpperBound
+  const lexicalTail =
+    lexicalContributionShare >
+    profile.domainSupport.lexicalContributionShareUpperBound
+  const unsupported = longWordTail && lexicalTail
+
+  return {
+    status: unsupported ? 'unsupported' : 'supported',
+    lexicalContributionShare,
+    reasons: unsupported
+      ? [
+          'Long-word density and lexical-formality model pressure jointly exceed the calibration corpus support bounds.',
+        ]
+      : [],
+  }
+}
+
 export function inferStatisticalLikelihood(
   features: StatisticalFeatureVector,
   profile: StatisticalCalibrationProfile = CALIBRATION_PROFILE,
 ): number {
-  let logit = profile.intercept
-  profile.featureNames.forEach((name) => {
-    const standardized = (features[name] - profile.means[name]) / profile.scales[name]
-    logit += standardized * profile.coefficients[name]
-  })
-  return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, logit))))
+  return explainStatisticalLikelihood(features, profile).probability
 }
 
 export function predictStatisticalLikelihood(text: string): number {

@@ -5,7 +5,10 @@ import {
   STATISTICAL_FEATURE_NAMES,
   createStatisticalWindowRanges,
   createStatisticalWindows,
+  assessStatisticalDomainSupport,
+  explainStatisticalLikelihood,
   extractStatisticalFeatures,
+  extractWritingCharacteristics,
   scoreStatisticalWindow,
 } from './statistical-features'
 
@@ -52,6 +55,54 @@ describe('statistical calibration', () => {
     expect(formulaicScore).toBeGreaterThan(
       CALIBRATION_PROFILE.detectionThreshold,
     )
+  })
+
+  it('exposes signed log-odds contributions separately from writing characteristics', () => {
+    const features = extractStatisticalFeatures(formulaicProse)
+    const explanation = explainStatisticalLikelihood(features)
+    const reconstructedLogit = explanation.contributions.reduce(
+      (total, factor) => total + factor.contribution,
+      explanation.intercept,
+    )
+    const characteristics = extractWritingCharacteristics(formulaicProse)
+
+    expect(explanation.logit).toBeCloseTo(reconstructedLogit, 12)
+    expect(explanation.probability).toBe(scoreStatisticalWindow(formulaicProse))
+    expect(explanation.contributions).toHaveLength(
+      STATISTICAL_FEATURE_NAMES.length,
+    )
+    expect(
+      explanation.contributions.some((factor) => factor.contribution > 0),
+    ).toBe(true)
+    expect(
+      explanation.contributions.some((factor) => factor.contribution < 0),
+    ).toBe(true)
+    expect(characteristics).toEqual({
+      longWordRatio: expect.any(Number),
+      citationSentenceRatio: 0,
+    })
+  })
+
+  it('keeps stock-phrase evidence supported when lexical formality is not dominant', () => {
+    const explanation = explainStatisticalLikelihood(
+      extractStatisticalFeatures(formulaicProse),
+    )
+    const contributions = Object.fromEntries(
+      explanation.contributions.map((factor) => [
+        factor.feature,
+        factor.contribution,
+      ]),
+    ) as Record<(typeof STATISTICAL_FEATURE_NAMES)[number], number>
+    const support = assessStatisticalDomainSupport(
+      extractWritingCharacteristics(formulaicProse),
+      contributions,
+    )
+
+    expect(support.status).toBe('supported')
+    expect(CALIBRATION_PROFILE.domainSupport.calibrationQuantile).toBe(0.995)
+    expect(
+      CALIBRATION_PROFILE.domainSupport.validationUnsupportedDocumentRate,
+    ).toBeLessThan(0.01)
   })
 
   it('creates only the 5-7 sentence windows used during training', () => {

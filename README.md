@@ -1,24 +1,64 @@
 # DraftLens
 
-DraftLens is a private, explainable AI-pattern coverage estimator for academic prose. Paste or import a report, review the share of qualifying prose detected by a calibrated local model, inspect reportable passages, and see the observable style evidence around each result.
+DraftLens is a private, explainable writing-pattern review app. It imports a document, estimates the share of qualifying prose that crosses a calibrated statistical threshold, shows the signed model terms behind each reportable passage, and stages revision suggestions as changes the writer must review.
 
 **Live app:** [draftlens-seven.vercel.app](https://draftlens-seven.vercel.app)
 
 > [!IMPORTANT]
-> DraftLens is an independent estimate, not an authorship test. It cannot prove who wrote a document, is not a plagiarism checker, is not affiliated with Turnitin, and does not reproduce Turnitin's proprietary model.
+> DraftLens is an independent estimate, not an authorship test. It cannot prove who wrote a document, is not a plagiarism checker, is not affiliated with Turnitin, and does not reproduce Turnitin's proprietary classifier.
 
-## What it does
+## Current workflow
 
-- Reads pasted text and local `.txt`, `.md`, `.docx`, and `.pdf` files up to 10 MB.
-- Filters headings, list fragments, common table fragments, unsupported-language text, and bibliography entries out of the qualifying-prose denominator.
-- Scores overlapping local windows and reports detected qualifying-word coverage instead of average stylistic intensity.
-- Uses the conservative display states `0%`, `*%` for raw 1-19% results, and exact percentages from 20-100%.
-- Requires at least 300 qualifying words for a reportable result.
-- Highlights detected passages only when the document reaches the 20% reporting line.
-- Separates reportable passages into `Review` (below 95/100 locally) and `Elevated` (95/100 or higher) context-review bands.
-- Retains explainable signals and revision coaching as secondary context.
-- Exports a real Word audit report with the summary, passage evidence, highlighted document, methodology, and limitations.
-- Runs entirely in the browser. DraftLens does not upload or save reports.
+1. **Add:** upload `.txt`, `.md`, `.docx`, or `.pdf`, or paste text.
+2. **Summary:** read the coverage calculation, sample sufficiency, and signed document-level model factors.
+3. **Evidence:** inspect one passage at a time, including source-page references, model factors that raised or lowered the local estimate, and review status.
+4. **Revise:** accept or reject tracked edits, verify protected facts and citations, preview the new audit, and then apply the draft.
+5. **Export:** download an audit report, a highlighted evidence document, or a clean Word document.
+
+The import pipeline reconstructs PDF reading order, removes recurring headers, footers, and page numbers, detects sparse pages, and can run English OCR locally with Tesseract. Import and analysis both expose progress and cancellation. Draft text recovery uses only the current browser tab's `sessionStorage`.
+
+## Score semantics
+
+The headline percentage is detected qualifying-word coverage:
+
+```text
+words inside detected passages / all qualifying prose words
+```
+
+| Raw diagnostic | Display | Meaning |
+| ---: | --- | --- |
+| 0% | `0%` | No qualifying passage crossed the calibrated threshold. |
+| 1–19% | `*%` | The exact result and highlights are suppressed because isolated low coverage is less reliable. |
+| 20–100% | Exact | The displayed share of qualifying prose lies inside detected passages. |
+| Unsupported domain | No percentage | The model is being driven beyond its calibration support, so DraftLens refuses to extrapolate. |
+
+`Review` means a detected passage has a local model estimate below 95/100. `Elevated` means the local estimate is at least 95/100. Both are inspection bands, not authorship findings.
+
+Model factors are signed logistic-model contributions: positive values raised the estimate and negative values lowered it. Writing characteristics are shown separately because a descriptive property is not proof of authorship.
+
+## Saturation guard
+
+The `ghostbuster-essay-v3-domain-gated` profile retains the existing 22-feature coefficients and `0.861392` detection threshold. It adds data-generated 99.5th-percentile support bounds for long-word density and concentrated lexical model pressure. An exact result is withheld only when both bounds are exceeded.
+
+This fixes the formal-academic saturation failure without hiding formulaic in-domain prose. On the supplied 52-page academic report, the old raw diagnostic remains high internally, but the public result is now `Outside calibrated domain`, the percentage is withheld, and no passage is presented as reportable evidence.
+
+The held-out Ghostbuster essay benchmark produced 0.926 window ROC-AUC, 0.61% human documents at or above the 20% reporting line, and 64.99% AI-document recall. These are corpus-specific measurements, not real-world guarantees. See [calibration and concordance](docs/calibration.md) for provenance, support bounds, public report anchors, and release gates.
+
+## Revision safety
+
+The local Revision Lab performs deterministic clarity cleanup and displays every proposed change with accept/reject controls. Numbers, citations, quotations, names, negations, and qualifiers are protected: changing them requires explicit acknowledgement before application.
+
+An optional contextual editor can revise only the selected passage for clarity, concision, or stronger reasoning. It is opt-in, requests `store: false`, uses a strict structured response, and explicitly refuses detector-evasion instructions. The feature remains disabled unless the deployment has both an `OPENAI_API_KEY` and `CONTEXTUAL_REVISION_ENABLED=true`; all analysis and local tracked revision continue to work without it.
+
+Do not revise text merely to lower a detector score. Keep every change accurate and reflective of the writer's own reasoning.
+
+## Privacy and offline behavior
+
+- Analysis, PDF extraction, OCR, and Word generation run in the browser.
+- DraftLens itself does not persist reports or draft text on a server. Tab recovery uses browser `sessionStorage` and expires after eight hours.
+- The optional contextual editor relays only the selected passage through Vercel to OpenAI after explicit consent. `store: false` disables reusable response storage, but OpenAI abuse-monitoring retention may still apply unless the project has approved data controls.
+- The installable app caches its lightweight shell and analyzer. Large PDF, OCR, and export assets remain lazy and are cached after use.
+- API availability responses are never placed in the service-worker cache.
 
 ## Run locally
 
@@ -27,7 +67,16 @@ npm install
 npm run dev
 ```
 
-Open the URL printed by Vite, usually `http://localhost:5173`.
+The optional contextual endpoint is a Vercel function in `api/revise.js`:
+
+```bash
+# Optional; do not expose this value to Vite/client code.
+vercel env add OPENAI_API_KEY
+vercel env add CONTEXTUAL_REVISION_ENABLED
+vercel env add OPENAI_REVISION_MODEL
+```
+
+Set `CONTEXTUAL_REVISION_ENABLED` to `true` only after configuring platform-level rate limiting and spend controls. If `OPENAI_REVISION_MODEL` is omitted, the endpoint defaults to `gpt-5.4-mini`. The function also applies a small warm-instance concurrency and request limit, but those controls are not a substitute for an edge-backed global limit.
 
 ## Verify
 
@@ -37,56 +86,20 @@ npm run lint
 npm run build
 ```
 
-The tests cover deterministic score bounds, coverage arithmetic, passage bands, qualifying-prose exclusions, bibliography invariance, score suppression, sentence offsets, calibration behavior, document import, and Word export integrity.
-
-## How the estimate works
-
-The version 2 pipeline follows the parts of Turnitin's workflow that are publicly documented without claiming access to its proprietary classifier:
-
-1. Identify qualifying English long-form prose.
-2. Analyze overlapping windows of approximately 5-10 sentences.
-3. Average the window estimates for every qualifying sentence.
-4. Mark sentences above a conservative, validation-derived threshold.
-5. Report detected qualifying words divided by all qualifying words.
-
-| Raw coverage | Display | Meaning |
-| ---: | --- | --- |
-| 0% | `0%` | No qualifying passage crossed the calibrated threshold. |
-| 1-19% | `*%` | Exact score and highlights are suppressed because isolated low-coverage results are less reliable. |
-| 20-49% | Exact | A reportable share of qualifying prose was detected. |
-| 50-100% | Exact | A high share of qualifying prose was detected. |
-
-The secondary pattern-intensity metric still summarizes visible stock phrasing, repeated openings and transitions, sentence-length uniformity, abstract wording, nominalizations, and low specificity. It is not used as the headline percentage.
-
-## Calibration
-
-The bundled `ghostbuster-essay-v2` profile is a compact logistic model over 22 passage-level features, trained with the CC BY 3.0 [Ghostbuster essay corpus](https://github.com/vivek3141/ghostbuster-data). Documents were split by prompt/file ID to prevent topic leakage. No source essay is bundled into the application.
-
-On the held-out corpus, the profile produced 0.926 window ROC-AUC, about 0.6% human-document false positives at the 20% reporting line, and 65.0% AI-document recall. These are benchmark-specific results, not a promise of real-world or Turnitin-equivalent accuracy.
-
-See [calibration and concordance](docs/calibration.md) for model provenance, public paired-report anchors, evaluation design, and release gates.
-
-## Responsible interpretation
-
-AI-text detection is an uncertain classification problem. Formal, technical, translated, template-based, or heavily edited human prose can resemble machine-generated prose, while newer models and paraphrasing can evade detection. Use the result as a review prompt:
-
-1. Read every surfaced passage in context.
-2. Compare it with notes, sources, and earlier drafts.
-3. Ask the writer to explain the reasoning where appropriate.
-4. Never use the percentage as the sole basis for an adverse decision.
-
-Do not revise text merely to change a detector score. Keep changes accurate and reflective of the writer's own reasoning.
+Coverage includes calibration behavior, domain suppression, sentence and page offsets, header/content/reference exclusion, OCR and cancellation, background-worker fallback, recovery, tracked/protected revision, all three Word exports, the PWA shell, and the Summary → Evidence → Revise interaction flow.
 
 ## Tech stack
 
-- React + TypeScript + Vite
+- React, TypeScript, and Vite
 - `pdfjs-dist` for local PDF extraction
+- Tesseract.js with bundled English data for lazy local OCR
 - `mammoth` for local DOCX extraction
-- `docx` for client-side Word audit generation
-- A deterministic, browser-side statistical profile with no runtime API call
-- Vitest for analyzer and import tests
+- `docx` for client-side Word generation
+- A deterministic browser-side statistical profile
+- An optional OpenAI Responses API Vercel function for selected-passage editing
+- Vitest and Testing Library
 
-The analyzer is in [`src/lib/analyzer.ts`](src/lib/analyzer.ts), the Word exporter is in [`src/lib/export-report.ts`](src/lib/export-report.ts), the feature extractor is in [`src/lib/statistical-features.ts`](src/lib/statistical-features.ts), and the generated profile is in [`src/data/calibration-profile.ts`](src/data/calibration-profile.ts).
+Core files: [`src/lib/analyzer.ts`](src/lib/analyzer.ts), [`src/lib/statistical-features.ts`](src/lib/statistical-features.ts), [`src/lib/document.ts`](src/lib/document.ts), [`src/lib/revision.ts`](src/lib/revision.ts), and [`src/lib/export-report.ts`](src/lib/export-report.ts).
 
 ## License
 

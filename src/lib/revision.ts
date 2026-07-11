@@ -83,6 +83,18 @@ export interface AppliedRevisionDraft {
   text: string
 }
 
+export type ProtectedContentKind =
+  | 'citation-or-number'
+  | 'quotation'
+  | 'name'
+  | 'qualifier'
+
+export interface ProtectedContentIssue {
+  kind: ProtectedContentKind
+  value: string
+  change: 'removed' | 'added'
+}
+
 const REVISION_WARNING =
   'DraftLens never invents facts, sources, quotations, names, numbers, or personal experience. Comprehensive edits tighten supported wording; evidence-dependent changes remain prompts. Review every change before applying it.'
 
@@ -298,6 +310,83 @@ function sentenceContainsQuotation(text: string): boolean {
 
 function protectedFragments(text: string): string[] {
   return text.match(PROTECTED_FRAGMENT_PATTERN) ?? []
+}
+
+const QUOTATION_PATTERN = /[“"]([^”"]{2,})[”"]/gu
+const NAME_PATTERN =
+  /\b\p{Lu}[\p{L}\p{M}'’.-]+(?:\s+\p{Lu}[\p{L}\p{M}'’.-]+)+\b/gu
+const QUALIFIER_PATTERN =
+  /\b(?:approximately|around|at\s+least|at\s+most|could|except|generally|may|might|never|no|not|only|possibly|typically|unless|without)\b/giu
+
+function counted(values: string[]): Map<string, { value: string; count: number }> {
+  const result = new Map<string, { value: string; count: number }>()
+  values.forEach((value) => {
+    const key = value.normalize('NFKC').toLocaleLowerCase()
+    const current = result.get(key)
+    result.set(key, { value, count: (current?.count ?? 0) + 1 })
+  })
+  return result
+}
+
+function protectedValues(
+  text: string,
+): Array<{ kind: ProtectedContentKind; values: string[] }> {
+  return [
+    { kind: 'citation-or-number', values: protectedFragments(text) },
+    {
+      kind: 'quotation',
+      values: [...text.matchAll(QUOTATION_PATTERN)].map((match) => match[0]),
+    },
+    { kind: 'name', values: text.match(NAME_PATTERN) ?? [] },
+    { kind: 'qualifier', values: text.match(QUALIFIER_PATTERN) ?? [] },
+  ]
+}
+
+export function validateProtectedContent(
+  sourceText: string,
+  revisedText: string,
+): ProtectedContentIssue[] {
+  const issues: ProtectedContentIssue[] = []
+  const revisedByKind = new Map(
+    protectedValues(revisedText).map(({ kind, values }) => [kind, counted(values)]),
+  )
+
+  protectedValues(sourceText).forEach(({ kind, values }) => {
+    const source = counted(values)
+    const revised = revisedByKind.get(kind) ?? new Map()
+    source.forEach(({ value, count }, key) => {
+      const missing = count - (revised.get(key)?.count ?? 0)
+      for (let index = 0; index < missing; index += 1) {
+        issues.push({ kind, value, change: 'removed' })
+      }
+    })
+    revised.forEach(({ value, count }, key) => {
+      const added = count - (source.get(key)?.count ?? 0)
+      for (let index = 0; index < added; index += 1) {
+        issues.push({ kind, value, change: 'added' })
+      }
+    })
+  })
+
+  return issues
+}
+
+export function composeRevisionDraft(
+  plan: RevisionPlan,
+  acceptedEditIds: Iterable<string>,
+): string {
+  const accepted = new Set(acceptedEditIds)
+  let text = plan.sourceText
+
+  ;[...plan.edits]
+    .filter((edit) => accepted.has(edit.id))
+    .sort((left, right) => right.start - left.start)
+    .forEach((edit) => {
+      if (plan.sourceText.slice(edit.start, edit.end) !== edit.before) return
+      text = `${text.slice(0, edit.start)}${edit.after}${text.slice(edit.end)}`
+    })
+
+  return text
 }
 
 function applyRules(

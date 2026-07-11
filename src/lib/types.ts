@@ -7,6 +7,39 @@ export type ScoreStatus =
   | 'below-reporting-threshold'
   | 'insufficient-prose'
   | 'out-of-range'
+  | 'unsupported-domain'
+
+export type DomainSupportStatus =
+  | 'supported'
+  | 'unsupported'
+  | 'not-assessed'
+
+export interface ModelFactor {
+  source: 'calibrated-model'
+  feature: string
+  label: string
+  value: number
+  standardizedValue: number
+  /** Signed contribution to the logistic model's log-odds. */
+  contribution: number
+  direction: 'raises' | 'lowers' | 'neutral'
+}
+
+export interface WritingCharacteristic {
+  source: 'writing-characteristic'
+  id: string
+  label: string
+  value: number
+  displayValue: string
+  description: string
+}
+
+export interface AnalysisDomainSupport {
+  status: DomainSupportStatus
+  label: string
+  reason: string
+  lexicalContributionShare: number
+}
 
 export type ExclusionReason =
   | 'non-prose'
@@ -54,6 +87,8 @@ export interface SentenceAnalysis {
   score: number
   classification: Classification
   signals: WritingSignal[]
+  /** Signed logistic terms averaged across this sentence's local windows. */
+  modelFactors?: ModelFactor[]
 }
 
 export interface TopSignal {
@@ -76,6 +111,8 @@ export interface FlaggedPassage {
   classification: Exclude<Classification, 'low'>
   sentenceIds: string[]
   signals: TopSignal[]
+  /** Strongest signed model terms for this passage. */
+  modelFactors?: ModelFactor[]
 }
 
 export interface AnalysisConfidence {
@@ -147,6 +184,11 @@ export interface AnalysisResult {
   coverage: CoverageResult
   /** Mean explainable style-pattern intensity over qualifying prose. */
   patternIntensity: number
+  /** Signed logistic terms; these explain model behavior, not authorship. */
+  modelFactors: ModelFactor[]
+  /** Observable document properties kept separate from model evidence. */
+  writingCharacteristics: WritingCharacteristic[]
+  domainSupport: AnalysisDomainSupport
   classification: Classification
   confidence: AnalysisConfidence
   summary: string
